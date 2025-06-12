@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import { witnesses, addWitness, reWitness, initializeStore, getActiveWitnesses, connectionStatus } from '../lib/witnessStore.js';
   import type { Witness } from '../lib/types.js';
 
@@ -10,8 +11,8 @@
   let showInput = false; // Track if input should be shown
   const maxLength = 140;
 
-  // Field navigation state
-  let fieldOffset = { x: 0, y: 0 };
+  // Field navigation state - start at field center (50%, 50%)
+  let fieldOffset = { x: 0, y: 0 }; // Will be set to center in onMount
   let isDragging = false;
   let dragStart = { x: 0, y: 0 };
   let centeredWitness: string | null = null;
@@ -24,16 +25,16 @@
   let witnessClusters = []; // Detected witness clusters for teleportation
   
   
-  // Much larger field size to handle massive agent loads
-  let fieldWidth = 8000;
-  let fieldHeight = 8000;
+  // Reasonable field size to reduce memory usage
+  let fieldWidth = 4000;
+  let fieldHeight = 4000;
   
   // Update field size on mount and resize
   const updateFieldSize = () => {
     if (typeof window !== 'undefined') {
-      // Minimum 8000px, scale up based on viewport for very large screens
-      fieldWidth = Math.max(8000, window.innerWidth * 3);
-      fieldHeight = Math.max(8000, window.innerHeight * 3);
+      // Reasonable size to reduce memory usage
+      fieldWidth = Math.max(4000, window.innerWidth * 2);
+      fieldHeight = Math.max(4000, window.innerHeight * 2);
     }
   };
 
@@ -46,6 +47,7 @@
   
   // Track witness count changes to trigger pulse animations (only for INCREASES)
   let previousWitnessCounts = new Map();
+  const MAX_PULSE_TRACKING = 200; // Limit size of tracking map
   $: {
     $witnesses.forEach(witness => {
       const prevCount = previousWitnessCounts.get(witness.id);
@@ -71,6 +73,12 @@
       if (!currentIds.has(id)) {
         previousWitnessCounts.delete(id);
       }
+    }
+    // Limit map size
+    if (previousWitnessCounts.size > MAX_PULSE_TRACKING) {
+      const entriesToRemove = previousWitnessCounts.size - MAX_PULSE_TRACKING;
+      const keysToRemove = Array.from(previousWitnessCounts.keys()).slice(0, entriesToRemove);
+      keysToRemove.forEach(key => previousWitnessCounts.delete(key));
     }
   }
   
@@ -156,11 +164,16 @@
   };
 
   // Detect witness clusters using spatial grouping
-  const detectWitnessClusters = (witnesses) => {
+  const detectWitnessClusters = (witnesses: Witness[]) => {
     if (witnesses.length === 0) return [];
     
-    const clusters = [];
-    const visited = new Set();
+    const clusters: Array<{
+      id: string;
+      witnesses: Witness[];
+      center: { x: number; y: number };
+      size: number;
+    }> = [];
+    const visited = new Set<string>();
     const clusterRadius = 25; // % - witnesses within 25% distance are in same cluster
     
     witnesses.forEach(witness => {
@@ -180,6 +193,7 @@
       witnesses.forEach(otherWitness => {
         if (!otherWitness.metadata.position || visited.has(otherWitness.id)) return;
         
+        if (!witness.metadata.position || !otherWitness.metadata.position) return;
         const distance = Math.sqrt(
           Math.pow(witness.metadata.position.x - otherWitness.metadata.position.x, 2) +
           Math.pow(witness.metadata.position.y - otherWitness.metadata.position.y, 2)
@@ -193,8 +207,8 @@
       });
       
       // Calculate cluster center
-      const centerX = cluster.witnesses.reduce((sum, w) => sum + w.metadata.position.x, 0) / cluster.size;
-      const centerY = cluster.witnesses.reduce((sum, w) => sum + w.metadata.position.y, 0) / cluster.size;
+      const centerX = cluster.witnesses.reduce((sum, w) => sum + (w.metadata.position?.x || 0), 0) / cluster.size;
+      const centerY = cluster.witnesses.reduce((sum, w) => sum + (w.metadata.position?.y || 0), 0) / cluster.size;
       cluster.center = { x: centerX, y: centerY };
       
       // Only add clusters with 2+ witnesses
@@ -207,8 +221,14 @@
     return clusters.sort((a, b) => b.size - a.size);
   };
 
+  const getClusterSummary = (cluster: { witnesses: Witness[]; size: number }) => {
+    // Just show the primary witness text (truncated)
+    const primaryWitness = cluster.witnesses[0];
+    return `"${primaryWitness.text.substring(0, 30)}..."`;
+  };
+
   // Teleport to a cluster
-  const teleportToCluster = (cluster) => {
+  const teleportToCluster = (cluster: { center: { x: number; y: number }; size: number }) => {
     console.log(`🌀 Teleporting to cluster with ${cluster.size} witnesses`);
     
     // Calculate field offset to center this cluster
@@ -235,23 +255,25 @@
     console.log(`📍 Teleported to cluster at ${cluster.center.x.toFixed(1)}%, ${cluster.center.y.toFixed(1)}%`);
   };
 
-  // Physics-based drift system
+  // Physics-based drift system with memory management
   let witnessVelocities = new Map(); // Track velocity for each witness
+  const MAX_VELOCITY_ENTRIES = 250; // Limit velocity map size
   
   onMount(() => {
     initializeStore();
     updateFieldSize();
     
-    // Auto-center on a random witness when page loads (for all devices)
+    // Start centered at field center (50%, 50%) - ensure field size is set first
     setTimeout(() => {
-      const activeWitnesses = getActiveWitnesses($witnesses);
-      if (activeWitnesses.length > 0) {
-        // Pick a random witness to center on
-        const randomWitness = activeWitnesses[Math.floor(Math.random() * activeWitnesses.length)];
-        centerWitness(randomWitness);
-        console.log('🎯 Auto-centered on random witness:', randomWitness.text.substring(0, 30) + '...');
-      }
-    }, 1000); // Give time for witnesses to load
+      const centerX = (50 / 100) * fieldWidth;
+      const centerY = (50 / 100) * fieldHeight;
+      fieldOffset = {
+        x: fieldWidth - (window.innerWidth / 2),
+        y: fieldHeight - (window.innerHeight / 2)
+      };
+      console.log('🎯 Initial centering:', { fieldWidth, fieldHeight, centerX, centerY, fieldOffset });
+    }, 100);
+    
     
     // Add resize listener
     const handleResize = () => updateFieldSize();
@@ -273,10 +295,11 @@
           
           // Apply repulsion force to prevent clustering (personal space)
           // Reduce physics calculations when field is crowded to prevent chaos
-          const maxPhysicsCalculations = Math.min(activeWitnesses.length, 50); // Cap at 50 interactions per witness
+          const maxPhysicsCalculations = Math.min(activeWitnesses.length, 20); // Cap at 20 interactions per witness for better performance
           const nearbyWitnesses = activeWitnesses
             .filter(w => w.id !== witness.id && w.metadata.position)
             .sort((a, b) => {
+              if (!a.metadata.position || !b.metadata.position || !witness.metadata.position) return 0;
               const distA = Math.sqrt(
                 Math.pow(a.metadata.position.x - witness.metadata.position.x, 2) +
                 Math.pow(a.metadata.position.y - witness.metadata.position.y, 2)
@@ -290,6 +313,7 @@
             .slice(0, maxPhysicsCalculations); // Only calculate physics with closest witnesses
           
           nearbyWitnesses.forEach(otherWitness => {
+            if (!otherWitness.metadata.position || !witness.metadata.position) return;
             const dx = otherWitness.metadata.position.x - witness.metadata.position.x;
             const dy = otherWitness.metadata.position.y - witness.metadata.position.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
@@ -329,7 +353,7 @@
           }
           
           // Apply random force every few seconds (based on entropy seed) - very gentle
-          const timeSeed = Date.now() / 20000 + witness.metadata.entropySeed * 100;
+          const timeSeed = Date.now() / 20000 + (witness.metadata.entropySeed || 0) * 100;
           if (Math.sin(timeSeed) > 0.99) { // ~1% chance per frame (less frequent)
             const forceStrength = 0.002 + Math.random() * 0.005; // 0.002-0.007% per frame (very gentle)
             const forceAngle = Math.random() * Math.PI * 2;
@@ -364,7 +388,7 @@
           };
         })
       );
-    }, 100); // 10 FPS for smooth movement
+    }, 150); // ~6.7 FPS to reduce CPU usage
     
     // Cleanup expired witness velocities
     const cleanupInterval = setInterval(() => {
@@ -373,6 +397,12 @@
         if (!currentIds.has(id)) {
           witnessVelocities.delete(id);
         }
+      }
+      // Also limit the size of the velocity map
+      if (witnessVelocities.size > MAX_VELOCITY_ENTRIES) {
+        const entriesToRemove = witnessVelocities.size - MAX_VELOCITY_ENTRIES;
+        const keysToRemove = Array.from(witnessVelocities.keys()).slice(0, entriesToRemove);
+        keysToRemove.forEach(key => witnessVelocities.delete(key));
       }
     }, 10000); // Clean up every 10 seconds
     
@@ -801,9 +831,9 @@
       class="field-canvas"
       style="transform: translate({fieldOffset.x}px, {fieldOffset.y}px); width: {fieldWidth}px; height: {fieldHeight}px;"
     >
-      <!-- Context Connection Lines -->
+      <!-- Context Connection Lines - limit to visible witnesses for performance -->
       <svg class="absolute inset-0 w-full h-full pointer-events-none" style="z-index: 1;">
-        {#each activeWitnesses as witness (witness.id)}
+        {#each activeWitnesses.slice(0, 100) as witness (witness.id)}
           {#if witness.contextOf}
             {@const parent = activeWitnesses.find(w => w.id === witness.contextOf)}
             {#if parent && parent.metadata.position && witness.metadata.position}
@@ -811,15 +841,21 @@
               {@const parentY = (parent.metadata.position.y / 100) * fieldHeight}
               {@const childX = (witness.metadata.position.x / 100) * fieldWidth}
               {@const childY = (witness.metadata.position.y / 100) * fieldHeight}
-              {@const midX = (parentX + childX) / 2 + (Math.sin(Date.now() / 10000 + witness.metadata.entropySeed * 10) * 20)}
-              {@const midY = (parentY + childY) / 2 + (Math.cos(Date.now() / 8000 + witness.metadata.entropySeed * 15) * 15)}
-              <path 
-                d="M {parentX} {parentY} Q {midX} {midY} {childX} {childY}"
-                stroke="rgba(99, 102, 241, 0.2)"
-                stroke-width="1"
-                fill="none"
-                stroke-dasharray="2,2"
-              />
+              {@const distanceToViewport = Math.sqrt(
+                Math.pow(childX + fieldOffset.x - window.innerWidth/2, 2) + 
+                Math.pow(childY + fieldOffset.y - window.innerHeight/2, 2)
+              )}
+              {#if distanceToViewport < 1500}
+                {@const midX = (parentX + childX) / 2}
+                {@const midY = (parentY + childY) / 2}
+                <path 
+                  d="M {parentX} {parentY} Q {midX} {midY} {childX} {childY}"
+                  stroke="rgba(99, 102, 241, 0.2)"
+                  stroke-width="1"
+                  fill="none"
+                  stroke-dasharray="2,2"
+                />
+              {/if}
             {/if}
           {/if}
         {/each}
@@ -910,10 +946,10 @@
               Island {index + 1}
             </div>
             <div class="text-xs text-gray-500 mt-1">
-              {cluster.size} witnesses • {cluster.center.x.toFixed(0)}%, {cluster.center.y.toFixed(0)}%
+              {cluster.size} witnesses • {getClusterSummary(cluster)}
             </div>
             <div class="text-xs text-indigo-600 mt-1">
-              {cluster.witnesses.slice(0, 2).map(w => `"${w.text.substring(0, 20)}..."`).join(', ')}
+              {cluster.witnesses.slice(0, 2).map((w: Witness) => `"${w.text.substring(0, 20)}..."`).join(', ')}
               {#if cluster.size > 2}
                 <span class="text-gray-400">+{cluster.size - 2} more</span>
               {/if}

@@ -8,8 +8,9 @@
 	let error = '';
 	let gunConnected = false;
 	let sortBy: 'timestamp' | 'expiration' | 'witnessCount' = 'timestamp';
-	let showExpired = true;
+	let showExpired = false; // Default to hiding expired to improve performance
 	let searchQuery = '';
+	let maxDisplayed = 50; // Limit initial display
 	
 	// Stress test state
 	let stressTestRunning = false;
@@ -67,7 +68,8 @@
 	async function loadAllWitnesses() {
 		try {
 			loading = true;
-			allWitnesses = [];
+			error = '';
+			// Don't clear allWitnesses if this is a refresh to avoid flickering
 			
 			console.log('🔍 Starting debug witness loading...');
 			
@@ -81,9 +83,8 @@
 			const fieldNode = gun.get('witness-field-collective-public-v3');
 			console.log('📡 Connected to Gun namespace: witness-field-collective-public-v3');
 			
+			let processedCount = 0;
 			const loadWitnessData = (data: any, key: string) => {
-				console.log('📥 Gun data received:', key, data);
-				
 				if (!data) return;
 				
 				// Skip non-witness data
@@ -93,8 +94,13 @@
 				
 				// Skip versioned copies
 				if (key.includes('-v') && key.match(/-v\d+$/)) {
-					console.log('Skipping versioned copy:', key);
 					return;
+				}
+				
+				// Throttle processing for performance
+				processedCount++;
+				if (processedCount % 100 === 0) {
+					console.log(`Processed ${processedCount} witnesses...`);
 				}
 				
 				let witness: Witness & { expired: boolean };
@@ -102,7 +108,6 @@
 				try {
 					// Handle old JSON string format
 					if (typeof data === 'string') {
-						console.log('Loading witness from JSON string format');
 						const rawWitness = JSON.parse(data);
 						witness = {
 							...rawWitness,
@@ -111,11 +116,8 @@
 					} 
 					// Handle new object format
 					else if (typeof data === 'object' && data.id) {
-						console.log('Loading witness from object format:', data);
-						
 						// Skip incomplete data
 						if (!data.text || !data.createdAt || !data.expiresAt) {
-							console.log('Skipping incomplete witness data:', data.id);
 							return;
 						}
 						
@@ -142,20 +144,21 @@
 							expired: Date.now() > data.expiresAt
 						};
 					} else {
-						console.log('Skipping non-witness data:', key, data);
 						return;
 					}
 					
-					// Update or add witness
+					// Update or add witness (batch updates for performance)
 					const existingIndex = allWitnesses.findIndex(w => w.id === witness.id);
 					if (existingIndex >= 0) {
 						allWitnesses[existingIndex] = witness;
-						console.log('Updated existing witness:', witness.id);
 					} else {
 						allWitnesses.push(witness);
-						console.log('Added new witness:', witness.id, witness.text?.substring(0, 30) + '...');
 					}
-					allWitnesses = [...allWitnesses];
+					
+					// Batch reactive updates every 10 witnesses to reduce DOM thrashing
+					if (allWitnesses.length % 10 === 0) {
+						allWitnesses = [...allWitnesses];
+					}
 					
 				} catch (e) {
 					console.warn('Failed to parse witness data:', e, data);
@@ -163,18 +166,17 @@
 			};
 			
 			// Load existing witnesses immediately
-			console.log('🔄 Loading existing witnesses with .once()...');
 			fieldNode.map().once(loadWitnessData);
 			
 			// Listen for new witnesses in real-time
-			console.log('👂 Setting up real-time listener with .on()...');
 			fieldNode.map().on(loadWitnessData);
 			
-			// Summary after delay
+			// Summary after delay and final update
 			setTimeout(() => {
-				console.log('📋 Loaded witnesses summary:', allWitnesses.length);
+				allWitnesses = [...allWitnesses]; // Final update
 				loading = false;
-			}, 3000);
+				console.log(`📋 Loaded ${allWitnesses.length} witnesses`);
+			}, 5000); // Give more time for large datasets
 			
 			// Also load from localStorage (browser only)
 			const localData = typeof window !== 'undefined' ? localStorage.getItem('witness-field-data') : null;
@@ -293,11 +295,9 @@
 		}
 		
 		const testText = `DEBUG_TEST_${Date.now()}`;
-		console.log('Creating test witness with valid PoW:', testText);
 		
 		// Compute real proof of work (~1 second)
 		const proof = await computeProofOfWork(testText.trim());
-		console.log('Proof of work completed:', proof);
 		
 		const fieldNode = gun.get('witness-field-collective-public-v3');
 		const witnessId = 'test_' + Math.random().toString(36).substr(2, 9);
@@ -320,7 +320,35 @@
 		};
 		
 		fieldNode.get(witnessId).put(testWitness);
-		console.log('Test witness created with valid PoW:', testWitness);
+		
+		// Add witness to local list immediately for instant feedback
+		const localWitness = {
+			id: witnessId,
+			text: testText,
+			createdAt: now,
+			expiresAt: now + (10 * 60 * 1000),
+			witnessCount: 1,
+			lastWitnessed: now,
+			contextOf: null,
+			proof: proof,
+			metadata: {
+				entropySeed: Math.random(),
+				contextTag: undefined,
+				position: {
+					x: 50 + (Math.random() - 0.5) * 40,
+					y: 50 + (Math.random() - 0.5) * 40
+				}
+			},
+			expired: false
+		};
+		
+		// Add to list immediately
+		allWitnesses = [...allWitnesses, localWitness];
+		
+		// Also force refresh after a delay to sync with Gun
+		setTimeout(() => {
+			loadAllWitnesses();
+		}, 2000);
 	}
 	
 	
@@ -394,7 +422,6 @@
 			agentsActive: 0
 		};
 		
-		console.log(`🚀 Starting stress test with ${stressTestAgents} agents for ${stressTestDuration} seconds`);
 		
 		const fieldNode = gun.get('witness-field-collective-public-v3');
 		const activeAgents = new Set();
@@ -465,7 +492,6 @@
 							});
 							
 							stressTestStats.rewitnessesPerformed++;
-							console.log(`👥 ${agentName} rewitnessed: ${targetWitness.text.substring(0, 30)}...`);
 						}
 					} else {
 						// Create new witness with valid proof-of-work
@@ -504,7 +530,6 @@
 						
 						fieldNode.get(witnessId).put(stressWitness);
 						stressTestStats.witnessesCreated++;
-						console.log(`✨ ${agentName} created with valid PoW: ${witnessText.substring(0, 50)}...`);
 					}
 				} catch (error) {
 					console.error(`❌ Agent ${agentName} error:`, error);
@@ -526,8 +551,6 @@
 	
 	function stopStressTest() {
 		stressTestRunning = false;
-		console.log('🛑 Stress test stopped');
-		console.log('📊 Final stats:', stressTestStats);
 	}
 	
 	$: filteredWitnesses = allWitnesses
@@ -546,7 +569,8 @@
 				default:
 					return 0;
 			}
-		});
+		})
+		.slice(0, maxDisplayed); // Limit display for performance
 	
 	function formatDate(timestamp: number): string {
 		return new Date(timestamp).toLocaleString();
@@ -612,6 +636,18 @@
 					<option value="timestamp">Creation Time</option>
 					<option value="expiration">Expiration Time</option>
 					<option value="witnessCount">Witness Count</option>
+				</select>
+			</label>
+			
+			<label>
+				Show:
+				<select bind:value={maxDisplayed}>
+					<option value={25}>25 witnesses</option>
+					<option value={50}>50 witnesses</option>
+					<option value={100}>100 witnesses</option>
+					<option value={200}>200 witnesses</option>
+					<option value={500}>500 witnesses</option>
+					<option value={1000}>1000 witnesses</option>
 				</select>
 			</label>
 			
@@ -747,6 +783,10 @@
 		
 		{#if filteredWitnesses.length === 0}
 			<div class="empty">No witnesses found matching your criteria</div>
+		{:else}
+			<div class="display-info">
+				Showing {filteredWitnesses.length} of {allWitnesses.filter(w => showExpired || !w.expired).filter(w => !searchQuery || w.text.toLowerCase().includes(searchQuery.toLowerCase()) || w.id.includes(searchQuery)).length} witnesses
+			</div>
 		{/if}
 	{/if}
 </div>
@@ -972,6 +1012,15 @@
 	
 	.error {
 		color: #f00;
+	}
+	
+	.display-info {
+		text-align: center;
+		padding: 1rem;
+		color: #666;
+		font-style: italic;
+		border-top: 1px solid #eee;
+		margin-top: 1rem;
 	}
 	
 	.witness-grid {

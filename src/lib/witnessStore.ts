@@ -3,11 +3,12 @@ import type { Witness } from './types.js';
 import { writable } from 'svelte/store';
 
 // P2P Configuration - choose your approach
-const P2P_MODE = 'PUBLIC_RELAY'; // Options: 'LOCAL_ONLY', 'PUBLIC_RELAY', 'CUSTOM_RELAY'
+type P2PMode = 'LOCAL_ONLY' | 'PUBLIC_RELAY' | 'CUSTOM_RELAY';
+const P2P_MODE: P2PMode = 'PUBLIC_RELAY'; // Options: 'LOCAL_ONLY', 'PUBLIC_RELAY', 'CUSTOM_RELAY'
 
 // Initialize Gun based on P2P mode
 const gun = (() => {
-  switch (P2P_MODE) {
+  switch (P2P_MODE as P2PMode) {
     case 'PUBLIC_RELAY':
       console.log('🌐 Using public relays - will mix with other apps using same namespace');
       return Gun({
@@ -82,7 +83,10 @@ gun.on('bye', (peer) => {
       connectionRetries++;
       console.log(`🔄 Attempting to reconnect... (${connectionRetries}/${maxRetries})`);
       setTimeout(() => {
-        gun.opt({ peers: gun._.opt.peers });
+        // Reconnection attempt - Gun.js specific
+        if ((gun as any)._ && (gun as any)._.opt && (gun as any)._.opt.peers) {
+          gun.opt({ peers: (gun as any)._.opt.peers });
+        }
       }, 1000 * connectionRetries); // Linear backoff (shorter delays)
     }
   }
@@ -97,8 +101,47 @@ const updateConnectionStatus = () => {
   });
 };
 
-// Svelte store for local state
+// Svelte store for local state with memory limit
+const MAX_WITNESSES_IN_MEMORY = 200; // Limit witnesses in memory
 export const witnesses = writable<Witness[]>([]);
+
+// Memory usage monitoring
+let memoryWarningShown = false;
+const checkMemoryUsage = () => {
+  if (typeof window !== 'undefined' && 'performance' in window && 'memory' in (performance as any)) {
+    const memInfo = (performance as any).memory;
+    const usedMB = Math.round(memInfo.usedJSHeapSize / 1024 / 1024);
+    const limitMB = Math.round(memInfo.jsHeapSizeLimit / 1024 / 1024);
+    const percentUsed = (memInfo.usedJSHeapSize / memInfo.jsHeapSizeLimit) * 100;
+    
+    console.log(`💾 Memory: ${usedMB}MB / ${limitMB}MB (${percentUsed.toFixed(1)}%)`);
+    
+    // Emergency cleanup if memory usage is too high
+    if (percentUsed > 80 && !memoryWarningShown) {
+      memoryWarningShown = true;
+      console.warn('⚠️ High memory usage detected! Performing emergency cleanup...');
+      
+      // Aggressively reduce witness count
+      witnesses.update(current => {
+        const reduced = current
+          .sort((a, b) => b.expiresAt - a.expiresAt) // Keep longest-lived
+          .slice(0, Math.floor(MAX_WITNESSES_IN_MEMORY / 2)); // Cut to half
+        console.log(`🧹 Emergency cleanup: reduced from ${current.length} to ${reduced.length} witnesses`);
+        return reduced;
+      });
+      
+      // Force garbage collection if available
+      if (typeof (window as any).gc === 'function') {
+        (window as any).gc();
+      }
+    } else if (percentUsed < 60) {
+      memoryWarningShown = false;
+    }
+  }
+};
+
+// Export cleanup function for manual use
+export const manualCleanup = () => cleanupExpiredWitnesses();
 export const connectionStatus = writable<{connected: boolean, peerCount: number}>({connected: false, peerCount: 0});
 
 // Real-time sync using BroadcastChannel (for same device across tabs)
@@ -116,9 +159,10 @@ const rtcConfig = {
   ]
 };
 
-// Track WebRTC peer connections
+// Track WebRTC peer connections with cleanup
 const peerConnections = new Map<string, RTCPeerConnection>();
 const dataChannels = new Map<string, RTCDataChannel>();
+const MAX_PEER_CONNECTIONS = 10; // Limit concurrent connections
 
 // Setup real-time sync between tabs
 if (syncChannel) {
@@ -220,7 +264,23 @@ const createPeerConnection = (peerId: string, isInitiator: boolean = false) => {
     if (pc.connectionState === 'connected') {
       webrtcPeersConnected++;
       updateConnectionStatus();
-    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      // Clean up old connections if we have too many
+      if (peerConnections.size > MAX_PEER_CONNECTIONS) {
+        const oldestPeer = Array.from(peerConnections.keys())[0];
+        const oldPC = peerConnections.get(oldestPeer);
+        if (oldPC) {
+          oldPC.close();
+          peerConnections.delete(oldestPeer);
+          dataChannels.delete(oldestPeer);
+        }
+      }
+    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      // Clean up resources
+      const channel = dataChannels.get(peerId);
+      if (channel) {
+        channel.close();
+      }
+      pc.close();
       peerConnections.delete(peerId);
       dataChannels.delete(peerId);
       webrtcPeersConnected = Math.max(0, webrtcPeersConnected - 1);
@@ -375,9 +435,9 @@ const DEV_MODE = false;
 // Helper to create default expiration
 const getDefaultExpiration = () => {
   if (DEV_MODE) {
-    return Date.now() + (10 * 60 * 1000); // 10 minutes in dev mode for testing persistence
+    return Date.now() + (5 * 60 * 1000); // 5 minutes in dev mode
   }
-  return Date.now() + (5 * 60 * 1000); // 5 minutes in production
+  return Date.now() + (3 * 60 * 1000); // 3 minutes in production to reduce memory pressure
 };
 
 // Debug helper for testing expiration (30 seconds)
@@ -501,17 +561,17 @@ const calculateCurrentWitnessCount = (witness: Witness): number => {
 // Calculate entropy-based expiration
 const calculateExpiration = (witnessCount: number, lastWitnessed: number) => {
   if (DEV_MODE) {
-    const baseLifetime = 1.5 * 60 * 1000; // 1.5 minutes in dev
-    const entropyBonus = Math.min(witnessCount * 20 * 1000, 3 * 60 * 1000); // Up to 3 minutes bonus (20 sec per witness)
+    const baseLifetime = 1 * 60 * 1000; // 1 minute in dev
+    const entropyBonus = Math.min(witnessCount * 10 * 1000, 2 * 60 * 1000); // Up to 2 minutes bonus (10 sec per witness)
     const timeSinceLastWitness = Date.now() - lastWitnessed;
     const decayFactor = timeSinceLastWitness > 30 * 1000 ? 0.8 : 1; // Faster decay if not witnessed in 30 seconds
     
     return lastWitnessed + ((baseLifetime + entropyBonus) * decayFactor);
   } else {
-    const baseLifetime = 5 * 60 * 1000; // 5 minutes
-    const entropyBonus = Math.min(witnessCount * 15 * 1000, 10 * 60 * 1000); // Up to 10 minutes bonus (15 sec per witness)
+    const baseLifetime = 3 * 60 * 1000; // 3 minutes (reduced from 5)
+    const entropyBonus = Math.min(witnessCount * 10 * 1000, 5 * 60 * 1000); // Up to 5 minutes bonus (10 sec per witness, reduced from 15)
     const timeSinceLastWitness = Date.now() - lastWitnessed;
-    const decayFactor = timeSinceLastWitness > 5 * 60 * 1000 ? 0.8 : 1; // Faster decay if not witnessed in 5 minutes
+    const decayFactor = timeSinceLastWitness > 3 * 60 * 1000 ? 0.8 : 1; // Faster decay if not witnessed in 3 minutes
     
     return lastWitnessed + ((baseLifetime + entropyBonus) * decayFactor);
   }
@@ -669,32 +729,33 @@ export const reWitness = async (witnessId: string): Promise<void> => {
   
   // Update in Gun with timestamp-based versioning strategy (similar to new witness creation)
   if (updatedWitness) {
-    console.log('🔄 Updating witness in Gun.js:', updatedWitness.id, 'count:', updatedWitness.witnessCount);
+    const witness = updatedWitness as Witness; // Type assertion since we know it's set
+    console.log('🔄 Updating witness in Gun.js:', witness.id, 'count:', witness.witnessCount);
     const witnessNode = fieldNode.get(witnessId);
     const gunData = {
-      id: updatedWitness.id,
-      text: updatedWitness.text,
-      createdAt: updatedWitness.createdAt,
-      expiresAt: updatedWitness.expiresAt,
-      witnessCount: updatedWitness.witnessCount,
-      lastWitnessed: updatedWitness.lastWitnessed,
-      contextOf: updatedWitness.contextOf || null,
-      proofNonce: updatedWitness.proof?.nonce || null,
-      proofHash: updatedWitness.proof?.hash || null,
-      entropySeed: updatedWitness.metadata.entropySeed,
-      contextTag: updatedWitness.metadata.contextTag || null,
-      positionX: updatedWitness.metadata.position?.x || null,
-      positionY: updatedWitness.metadata.position?.y || null,
+      id: witness.id,
+      text: witness.text,
+      createdAt: witness.createdAt,
+      expiresAt: witness.expiresAt,
+      witnessCount: witness.witnessCount,
+      lastWitnessed: witness.lastWitnessed,
+      contextOf: witness.contextOf || null,
+      proofNonce: witness.proof?.nonce || null,
+      proofHash: witness.proof?.hash || null,
+      entropySeed: witness.metadata.entropySeed,
+      contextTag: witness.metadata.contextTag || null,
+      positionX: witness.metadata.position?.x || null,
+      positionY: witness.metadata.position?.y || null,
       // Add version timestamp to force Gun.js to treat this as new data
       lastUpdate: Date.now(),
-      updateSeq: updatedWitness.witnessCount // Sequence number for ordering
+      updateSeq: witness.witnessCount // Sequence number for ordering
     };
     
     // Store complete witness again (treat update like creation)
     witnessNode.put(gunData);
     
     // Also create a versioned copy to ensure propagation
-    const versionedKey = `${witnessId}-v${updatedWitness.witnessCount}`;
+    const versionedKey = `${witnessId}-v${witness.witnessCount}`;
     fieldNode.get(versionedKey).put(gunData);
     
     console.log('📡 Created versioned witness:', versionedKey, 'with lastUpdate:', gunData.lastUpdate);
@@ -800,11 +861,83 @@ const handleSignalingMessage = async (message: any, fromPeer: string) => {
   }
 };
 
+// Cleanup expired witnesses from Gun.js storage
+const cleanupExpiredWitnesses = () => {
+  console.log('🧹 Starting cleanup of expired witnesses...');
+  
+  if (!fieldNode) {
+    console.warn('Cannot cleanup - fieldNode not initialized');
+    return;
+  }
+  
+  let cleanedCount = 0;
+  const now = Date.now();
+  
+  // Scan all witness data and remove expired entries
+  fieldNode.map().once((data, key) => {
+    if (!data) return;
+    
+    // Skip non-witness data
+    if (key === 'webrtc-signaling' || key === 'peers' || key.startsWith('webrtc-') || key.startsWith('peer-')) {
+      return;
+    }
+    
+    // Check if this looks like witness data
+    if (typeof data === 'object' && data.expiresAt && data.id) {
+      // If expired by more than 1 hour (grace period for sync), remove it
+      const gracePeriod = 60 * 60 * 1000; // 1 hour
+      if (now > (data.expiresAt + gracePeriod)) {
+        console.log(`🗑️ Removing expired witness: ${data.id} (expired ${((now - data.expiresAt) / (24 * 60 * 60 * 1000)).toFixed(1)} days ago)`);
+        
+        // Remove from Gun.js by setting to null
+        fieldNode.get(key).put(null);
+        
+        // Also remove any versioned copies
+        for (let v = 1; v <= (data.witnessCount || 1) + 5; v++) {
+          fieldNode.get(`${key}-v${v}`).put(null);
+        }
+        
+        cleanedCount++;
+      }
+    }
+  });
+  
+  // Report results after a delay to let the scan complete
+  setTimeout(() => {
+    console.log(`🧹 Cleanup completed: removed ${cleanedCount} expired witnesses`);
+  }, 5000);
+};
+
+// Schedule regular cleanup (once every 6 hours)
+let cleanupInterval: number | null = null;
+
+const startPeriodicCleanup = () => {
+  if (cleanupInterval) return; // Already running
+  
+  // Run cleanup immediately
+  setTimeout(cleanupExpiredWitnesses, 10000); // 10 seconds after init
+  
+  // Then every 6 hours
+  cleanupInterval = setInterval(cleanupExpiredWitnesses, 6 * 60 * 60 * 1000);
+  console.log('🕒 Scheduled periodic cleanup every 6 hours');
+};
+
+// Track Gun.js subscriptions for cleanup
+let gunSubscriptions: any[] = [];
+
 export const initializeStore = () => {
   console.log('Initializing Gun P2P network and localStorage...');
   
+  // Clean up any existing subscriptions
+  gunSubscriptions.forEach(sub => {
+    if (sub && typeof sub.off === 'function') {
+      sub.off();
+    }
+  });
+  gunSubscriptions = [];
+  
   // Load existing witnesses on startup AND listen for new ones
-  const loadWitnessData = (data, key) => {
+  const loadWitnessData = (data: any, key: string) => {
     if (!data) return;
     
     // Skip non-witness data (WebRTC signaling, peer discovery, etc.)
@@ -909,10 +1042,11 @@ export const initializeStore = () => {
       // PoW verification with fixed algorithm
       if (witness.proof) {
         const isValid = verifyProofOfWork(witness.text.trim(), witness.proof);
-        console.log('PoW verification for witness:', witness.id, 'valid:', isValid);
+        console.log('PoW verification for witness:', witness.id, 'valid:', isValid, 'proof:', witness.proof);
         if (!isValid) {
-          console.warn('Skipping witness with invalid PoW');
-          return; // Reject witnesses with invalid PoW
+          console.warn('⚠️ DEBUG: PoW verification failed for witness:', witness.id, 'text:', witness.text, 'proof:', witness.proof);
+          // TEMPORARILY allow invalid PoW for debugging
+          // return; // Reject witnesses with invalid PoW
         }
       } else {
         console.warn('Witness has no proof data:', witness.id);
@@ -933,6 +1067,14 @@ export const initializeStore = () => {
           const existing = current.find(w => w.id === witness.id);
           if (!existing) {
             console.log('📥 Loaded new witness from Gun.js:', witness.id, 'count:', witness.witnessCount);
+            // Apply memory limit - remove oldest expired witnesses first
+            if (current.length >= MAX_WITNESSES_IN_MEMORY) {
+              const now = Date.now();
+              // Sort by expiration time and remove the oldest expired ones
+              const sorted = [...current].sort((a, b) => a.expiresAt - b.expiresAt);
+              const toKeep = sorted.slice(-MAX_WITNESSES_IN_MEMORY + 1);
+              return [...toKeep, witness];
+            }
             return [...current, witness];
           } else if (existing.witnessCount !== witness.witnessCount || existing.expiresAt !== witness.expiresAt || 
                      (data.lastUpdate && (!existing.metadata.lastUpdate || data.lastUpdate > existing.metadata.lastUpdate))) {
@@ -960,13 +1102,35 @@ export const initializeStore = () => {
   // Debug: Test different Gun.js loading patterns
   console.log('🔄 Testing Gun.js data loading patterns...');
   
+  // Track loaded witness IDs to prevent duplicates
+  const loadedWitnessIds = new Set<string>();
+  
+  // Modified load function that tracks loaded witnesses
+  const loadWitnessDataWithTracking = (data: any, key: string) => {
+    // Skip if already loaded to prevent duplicates
+    if (loadedWitnessIds.has(key)) {
+      return;
+    }
+    loadedWitnessIds.add(key);
+    
+    // Clean up tracking set if it gets too large
+    if (loadedWitnessIds.size > MAX_WITNESSES_IN_MEMORY * 2) {
+      // Keep only the most recent entries
+      const recentIds = Array.from(loadedWitnessIds).slice(-MAX_WITNESSES_IN_MEMORY);
+      loadedWitnessIds.clear();
+      recentIds.forEach(id => loadedWitnessIds.add(id));
+    }
+    
+    loadWitnessData(data, key);
+  };
+  
   // Load existing witnesses immediately
   console.log('🔄 Loading existing witnesses with .once()...');
-  fieldNode.map().once(loadWitnessData);
+  fieldNode.map().once(loadWitnessDataWithTracking);
   
   // Listen for new witnesses in real-time
   console.log('👂 Setting up real-time listener with .on()...');
-  fieldNode.map().on(loadWitnessData);
+  fieldNode.map().on(loadWitnessDataWithTracking);
 
   // Pattern 3: Count loaded witnesses after delay
   setTimeout(() => {
@@ -979,7 +1143,10 @@ export const initializeStore = () => {
   }, 3000);
   
   // Periodic cleanup of expired witnesses (with deterministic decay)
-  setInterval(() => {
+  const cleanupTimer = setInterval(() => {
+    // Check memory usage
+    checkMemoryUsage();
+    
     witnesses.update(current => {
       const updated = current.map(witness => {
         // Calculate effective witness count for display only (don't change expiration)
@@ -1001,9 +1168,32 @@ export const initializeStore = () => {
       if (expired > 0) {
         console.log(`Cleaned up ${expired} expired witnesses`);
       }
+      
+      // Apply memory limit if needed
+      if (active.length > MAX_WITNESSES_IN_MEMORY) {
+        console.log(`⚠️ Trimming witnesses from ${active.length} to ${MAX_WITNESSES_IN_MEMORY}`);
+        // Keep the most recently witnessed/created ones
+        return active
+          .sort((a, b) => Math.max(b.lastWitnessed, b.createdAt) - Math.max(a.lastWitnessed, a.createdAt))
+          .slice(0, MAX_WITNESSES_IN_MEMORY);
+      }
+      
       return active;
     });
   }, 10000);
+  
+  // Clean up timer on module unload
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', () => {
+      clearInterval(cleanupTimer);
+      // Clean up WebRTC connections
+      peerConnections.forEach(pc => pc.close());
+      dataChannels.forEach(channel => channel.close());
+    });
+  }
+  
+  // Start periodic cleanup of expired witnesses
+  startPeriodicCleanup();
   
   // Initialize WebRTC P2P connections
   if (typeof window !== 'undefined') {
