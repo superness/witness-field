@@ -82,6 +82,79 @@
   
   $: if (debugMode) console.log('Total witnesses:', $witnesses.length, 'Active witnesses:', activeWitnesses.length);
 
+  // Enhanced debug information
+  $: debugStats = debugMode ? {
+    totalWitnesses: $witnesses.length,
+    activeWitnesses: activeWitnesses.length,
+    expiredWitnesses: $witnesses.length - activeWitnesses.length,
+    connectionStatus: $connectionStatus,
+    currentViewport: {
+      centerX: ((-fieldOffset.x + window.innerWidth / 2) / fieldWidth * 100).toFixed(1),
+      centerY: ((-fieldOffset.y + window.innerHeight / 2) / fieldHeight * 100).toFixed(1)
+    },
+    fieldSize: { width: fieldWidth, height: fieldHeight },
+    clusters: witnessClusters.length,
+    testWitnesses: activeWitnesses.filter(w => w.text.startsWith('SYNC_TEST_')).length,
+    lastRefresh: new Date().toISOString(),
+    loadTime: Date.now()
+  } : null;
+
+  // Get witness position relative to current viewport
+  const getWitnessViewportInfo = (witness: Witness) => {
+    if (!witness.metadata.position) return null;
+    
+    const witnessX = (witness.metadata.position.x / 100) * fieldWidth;
+    const witnessY = (witness.metadata.position.y / 100) * fieldHeight;
+    
+    const screenX = witnessX + fieldOffset.x;
+    const screenY = witnessY + fieldOffset.y;
+    
+    const isVisible = screenX >= -100 && screenX <= window.innerWidth + 100 && 
+                      screenY >= -100 && screenY <= window.innerHeight + 100;
+    
+    const distance = Math.sqrt(
+      Math.pow((-fieldOffset.x + window.innerWidth / 2) - witnessX, 2) +
+      Math.pow((-fieldOffset.y + window.innerHeight / 2) - witnessY, 2)
+    );
+    
+    return {
+      screenX: screenX.toFixed(0),
+      screenY: screenY.toFixed(0),
+      fieldX: witness.metadata.position.x.toFixed(1),
+      fieldY: witness.metadata.position.y.toFixed(1),
+      distance: distance.toFixed(0),
+      isVisible,
+      direction: getDirectionTo(witnessX, witnessY)
+    };
+  };
+
+  // Get direction arrow to witness
+  const getDirectionTo = (targetX: number, targetY: number) => {
+    const viewportCenterX = -fieldOffset.x + window.innerWidth / 2;
+    const viewportCenterY = -fieldOffset.y + window.innerHeight / 2;
+    
+    const dx = targetX - viewportCenterX;
+    const dy = targetY - viewportCenterY;
+    
+    const angle = Math.atan2(dy, dx);
+    const degrees = (angle * 180 / Math.PI + 360) % 360;
+    
+    if (degrees < 22.5 || degrees >= 337.5) return '→';
+    if (degrees < 67.5) return '↘';
+    if (degrees < 112.5) return '↓';
+    if (degrees < 157.5) return '↙';
+    if (degrees < 202.5) return '←';
+    if (degrees < 247.5) return '↖';
+    if (degrees < 292.5) return '↑';
+    return '↗';
+  };
+
+  // Jump to specific witness
+  const jumpToWitness = (witness: Witness) => {
+    centerWitness(witness);
+    console.log('🎯 Debug: Jumped to witness:', witness.text.substring(0, 50) + '...');
+  };
+
   // Detect witness clusters using spatial grouping
   const detectWitnessClusters = (witnesses) => {
     if (witnesses.length === 0) return [];
@@ -850,6 +923,95 @@
       
       <div class="text-xs text-gray-400 mt-3 pt-2 border-t border-gray-200">
         Click an island to teleport there instantly
+      </div>
+    </div>
+  {/if}
+
+  <!-- Debug Panel -->
+  {#if debugMode && debugStats}
+    <div class="fixed top-4 left-4 z-30 bg-black/90 backdrop-blur-sm rounded-lg shadow-xl border border-gray-600 p-4 max-w-md text-white text-xs font-mono">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold text-green-400">🐛 DEBUG MODE</h3>
+        <div class="text-xs text-gray-400">?debug</div>
+      </div>
+      
+      <!-- Stats Overview -->
+      <div class="grid grid-cols-2 gap-2 mb-4 text-xs">
+        <div class="bg-gray-800 p-2 rounded">
+          <div class="text-green-400">Total Witnesses</div>
+          <div class="text-xl font-bold">{debugStats.totalWitnesses}</div>
+        </div>
+        <div class="bg-gray-800 p-2 rounded">
+          <div class="text-blue-400">Active</div>
+          <div class="text-xl font-bold">{debugStats.activeWitnesses}</div>
+        </div>
+        <div class="bg-gray-800 p-2 rounded">
+          <div class="text-red-400">Expired</div>
+          <div class="text-xl font-bold">{debugStats.expiredWitnesses}</div>
+        </div>
+        <div class="bg-gray-800 p-2 rounded">
+          <div class="text-purple-400">Islands</div>
+          <div class="text-xl font-bold">{debugStats.clusters}</div>
+        </div>
+      </div>
+
+      <!-- Current Position -->
+      <div class="mb-4 p-2 bg-gray-800 rounded">
+        <div class="text-yellow-400 mb-1">Current Viewport Center</div>
+        <div>Field: {debugStats.currentViewport.centerX}%, {debugStats.currentViewport.centerY}%</div>
+        <div class="text-gray-400">Field Size: {debugStats.fieldSize.width}×{debugStats.fieldSize.height}px</div>
+        <div class="text-gray-400">Status: {debugStats.connectionStatus}</div>
+      </div>
+
+      <!-- Sync Test Status -->
+      <div class="mb-4 p-2 bg-gray-800 rounded">
+        <div class="text-cyan-400 mb-1">🧪 Sync Test Status</div>
+        <div class="text-xs">
+          <div>Test Witnesses: <span class="text-green-400">{debugStats.testWitnesses}</span></div>
+          <div>Last Refresh: {debugStats.lastRefresh.split('T')[1].split('.')[0]}</div>
+          <div class="mt-1 text-gray-400">
+            Run: <code class="bg-gray-700 px-1 rounded">node sync-verifier.js</code>
+          </div>
+          <div class="text-gray-400">
+            Then refresh this page to test sync
+          </div>
+        </div>
+      </div>
+
+      <!-- Witness List -->
+      <div class="mb-2">
+        <div class="text-cyan-400 font-bold mb-2">All Witnesses ({activeWitnesses.length} active)</div>
+        <div class="max-h-48 overflow-y-auto space-y-1">
+          {#each activeWitnesses.slice().sort((a, b) => {
+            const aInfo = getWitnessViewportInfo(a);
+            const bInfo = getWitnessViewportInfo(b);
+            return Number(aInfo?.distance || 999999) - Number(bInfo?.distance || 999999);
+          }) as witness}
+            {@const info = getWitnessViewportInfo(witness)}
+            {#if info}
+              <div class="flex items-center justify-between p-1 rounded {info.isVisible ? 'bg-green-900/50' : 'bg-gray-800/50'}">
+                <div class="flex-1 min-w-0">
+                  <div class="truncate text-xs">"{witness.text.substring(0, 30)}..."</div>
+                  <div class="text-xs text-gray-400">
+                    @{info.fieldX}%,{info.fieldY}% • {info.distance}px • {info.direction}
+                    {#if info.isVisible}<span class="text-green-400">VISIBLE</span>{/if}
+                  </div>
+                </div>
+                <button 
+                  class="ml-2 px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs transition-colors"
+                  on:click={() => jumpToWitness(witness)}
+                  title="Jump to this witness"
+                >
+                  GO
+                </button>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </div>
+
+      <div class="text-xs text-gray-400 pt-2 border-t border-gray-600">
+        Witnesses sorted by distance • Green = visible • Click GO to jump
       </div>
     </div>
   {/if}

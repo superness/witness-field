@@ -15,11 +15,10 @@ const gun = (() => {
           'https://the-witness-field-production.up.railway.app/gun',
           'wss://the-witness-field-production.up.railway.app/gun'
         ],
-        localStorage: true,
-        radisk: true,
+        localStorage: true,  // Re-enable for browser persistence
+        radisk: true,        // Re-enable for browser caching  
         retry: 1,
-        timeout: 5000,
-        fallback: true
+        timeout: 5000
       });
     
     case 'CUSTOM_RELAY':
@@ -318,7 +317,8 @@ const computeProofOfWork = async (text: string): Promise<{nonce: number, hash: s
         
         // Check if we've hit our time target
         if (Date.now() - startTime >= 1000) {
-          const finalHash = hash.toString(16);
+          // Ensure consistent hash representation (handle negative numbers)
+          const finalHash = (hash >>> 0).toString(16);
           resolve({ nonce, hash: finalHash });
           return;
         }
@@ -345,8 +345,29 @@ const verifyProofOfWork = (text: string, proof: {nonce: number, hash: string}): 
     hash = (hash * 1103515245 + 12345) & 0xffffffff;
   }
   
-  return hash.toString(16) === proof.hash;
+  // Handle both signed and unsigned hash representations
+  const calculatedHashSigned = hash.toString(16);
+  const calculatedHashUnsigned = (hash >>> 0).toString(16);
+  const isValid = calculatedHashSigned === proof.hash || calculatedHashUnsigned === proof.hash;
+  
+  // Debug logging for first few failures
+  if (!isValid && debugPoWFailures < 5) {
+    debugPoWFailures++;
+    console.log('🔍 PoW Debug:', {
+      text: text.substring(0, 30) + '...',
+      nonce: proof.nonce,
+      expectedHash: proof.hash,
+      calculatedHashSigned: calculatedHashSigned,
+      calculatedHashUnsigned: calculatedHashUnsigned,
+      hashNumeric: hash,
+      dataString: data.substring(0, 50) + '...'
+    });
+  }
+  
+  return isValid;
 };
+
+let debugPoWFailures = 0;
 
 // Development mode - set to true for fast testing
 const DEV_MODE = false;
@@ -842,6 +863,8 @@ export const initializeStore = () => {
           console.warn('Skipping witness with invalid PoW');
           return;
         }
+      } else {
+        console.warn('Witness has no proof data:', witness.id);
       }
       
       // Calculate current effective witness count for display only
@@ -874,20 +897,35 @@ export const initializeStore = () => {
           return current;
         });
       } else {
-        console.log('❌ Witness expired, not loading:', witness.id);
+        const ageMinutes = Math.floor((Date.now() - witness.createdAt) / 60000);
+        const expiredMinutes = Math.floor((Date.now() - witness.expiresAt) / 60000);
+        console.log(`❌ Witness expired, not loading: ${witness.id} (age: ${ageMinutes}min, expired ${expiredMinutes}min ago)`);
       }
     } catch (e) {
       console.warn('Failed to parse witness data:', e, data);
     }
   };
 
-  // FIRST: Load existing witnesses immediately (for page refresh)
-  console.log('🔄 Loading existing witnesses...');
+  // Debug: Test different Gun.js loading patterns
+  console.log('🔄 Testing Gun.js data loading patterns...');
+  
+  // Load existing witnesses immediately
+  console.log('🔄 Loading existing witnesses with .once()...');
   fieldNode.map().once(loadWitnessData);
   
-  // SECOND: Listen for new witnesses in real-time
-  console.log('👂 Setting up real-time witness listener...');
+  // Listen for new witnesses in real-time
+  console.log('👂 Setting up real-time listener with .on()...');
   fieldNode.map().on(loadWitnessData);
+
+  // Pattern 3: Count loaded witnesses after delay
+  setTimeout(() => {
+    console.log('🔍 Witness loading summary after 3 seconds...');
+    witnesses.subscribe(current => {
+      console.log(`📋 Total witnesses in store: ${current.length}`);
+      const expired = current.filter(w => w.expiresAt <= Date.now()).length;
+      console.log(`   Active: ${current.length - expired}, Expired: ${expired}`);
+    })();
+  }, 3000);
   
   // Periodic cleanup of expired witnesses (with deterministic decay)
   setInterval(() => {
