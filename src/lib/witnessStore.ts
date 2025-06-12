@@ -394,63 +394,90 @@ const isPositionTooClose = (newPos: {x: number, y: number}, existingWitnesses: W
   });
 };
 
+// Calculate how many witnesses are connected to a given witness
+const getConnectionCount = (witnessId: string, allWitnesses: Witness[]): number => {
+  return allWitnesses.filter(w => w.contextOf === witnessId).length;
+};
+
+// Find a smart nearby spot for a connected witness
+const findSmartNearbySpot = (parentWitness: Witness, allWitnesses: Witness[]): {x: number, y: number} => {
+  if (!parentWitness.metadata.position) {
+    return { x: 50, y: 50 }; // Fallback to center
+  }
+  
+  const parent = parentWitness.metadata.position;
+  const distance = 2; // Fixed 2% distance
+  
+  // Try 8 directions around parent: N, NE, E, SE, S, SW, W, NW
+  const directions = [
+    { x: 0, y: -distance },    // N
+    { x: distance, y: -distance }, // NE
+    { x: distance, y: 0 },     // E
+    { x: distance, y: distance },  // SE
+    { x: 0, y: distance },     // S
+    { x: -distance, y: distance }, // SW
+    { x: -distance, y: 0 },    // W
+    { x: -distance, y: -distance } // NW
+  ];
+  
+  // Try each direction
+  for (const dir of directions) {
+    const testPos = {
+      x: Math.max(1, Math.min(99, parent.x + dir.x)),
+      y: Math.max(1, Math.min(99, parent.y + dir.y))
+    };
+    
+    // Check if this spot is far enough from other witnesses
+    const tooClose = allWitnesses.some(w => {
+      if (!w.metadata.position || w.id === parentWitness.id) return false;
+      const dx = w.metadata.position.x - testPos.x;
+      const dy = w.metadata.position.y - testPos.y;
+      return Math.sqrt(dx * dx + dy * dy) < 1.5; // 1.5% minimum distance
+    });
+    
+    if (!tooClose) {
+      return testPos;
+    }
+  }
+  
+  // If all 8 spots taken, just place at first direction
+  return {
+    x: Math.max(1, Math.min(99, parent.x + directions[0].x)),
+    y: Math.max(1, Math.min(99, parent.y + directions[0].y))
+  };
+};
+
 // Generate spatial position for field layout - spread out across the full field
 const generatePosition = (contextWitness?: Witness, existingWitnesses: Witness[] = []) => {
-  let attempts = 0;
-  let position: {x: number, y: number};
+  // For context witnesses, use smart nearby placement
+  if (contextWitness && contextWitness.metadata.position) {
+    return findSmartNearbySpot(contextWitness, existingWitnesses);
+  }
   
-  // Calculate crowding factor to adjust behavior
-  const crowdingFactor = Math.min(1, existingWitnesses.length / 50);
-  
-  do {
-    if (contextWitness && contextWitness.metadata.position && attempts < 15) {
-      // Position near context witness with larger drift when crowded
-      const baseDrift = 8 + Math.random() * 12; // 8-20% base drift
-      const crowdingBonus = crowdingFactor * 20; // Extra drift when crowded
-      const drift = baseDrift + crowdingBonus;
+  // For non-context witnesses, use the existing random placement logic
+  if (existingWitnesses.length > 0 && existingWitnesses.length < 30) {
+    // When not too crowded, position near existing witnesses
+    const randomExisting = existingWitnesses[Math.floor(Math.random() * existingWitnesses.length)];
+    if (randomExisting.metadata.position) {
+      const drift = 20 + Math.random() * 30; // 20-50% drift from existing
       const angle = Math.random() * Math.PI * 2;
       
       const newX = Math.max(2, Math.min(98, 
-        contextWitness.metadata.position.x + Math.cos(angle) * drift
+        randomExisting.metadata.position.x + Math.cos(angle) * drift
       ));
       const newY = Math.max(2, Math.min(98, 
-        contextWitness.metadata.position.y + Math.sin(angle) * drift
+        randomExisting.metadata.position.y + Math.sin(angle) * drift
       ));
       
-      position = { x: newX, y: newY };
-    } else if (existingWitnesses.length > 0 && existingWitnesses.length < 30) {
-      // When not too crowded, position near existing witnesses
-      const randomExisting = existingWitnesses[Math.floor(Math.random() * existingWitnesses.length)];
-      if (randomExisting.metadata.position) {
-        const drift = 20 + Math.random() * 30; // 20-50% drift from existing
-        const angle = Math.random() * Math.PI * 2;
-        
-        const newX = Math.max(2, Math.min(98, 
-          randomExisting.metadata.position.x + Math.cos(angle) * drift
-        ));
-        const newY = Math.max(2, Math.min(98, 
-          randomExisting.metadata.position.y + Math.sin(angle) * drift
-        ));
-        
-        position = { x: newX, y: newY };
-      } else {
-        // Use full field area
-        position = {
-          x: 5 + Math.random() * 90, // 5-95% of field (almost full area)
-          y: 5 + Math.random() * 90,
-        };
-      }
-    } else {
-      // When crowded or first witness - spread across entire field
-      position = {
-        x: 5 + Math.random() * 90, // Use full 5-95% of field
-        y: 5 + Math.random() * 90,
-      };
+      return { x: newX, y: newY };
     }
-    attempts++;
-  } while (isPositionTooClose(position, existingWitnesses, crowdingFactor > 0.5 ? 2 : 4) && attempts < 30);
+  }
   
-  return position;
+  // Default: spread across entire field
+  return {
+    x: 5 + Math.random() * 90, // Use full 5-95% of field
+    y: 5 + Math.random() * 90,
+  };
 };
 
 // Calculate what the witness count SHOULD be based on deterministic decay
@@ -818,6 +845,18 @@ export const initializeStore = () => {
             position: rawWitness.metadata?.position
           }
         };
+        
+        // Override network position for connected witnesses with smart nearby placement
+        if (witness.contextOf) {
+          witnesses.update(current => {
+            const parentWitness = current.find(w => w.id === witness.contextOf);
+            if (parentWitness && parentWitness.metadata.position) {
+              witness.metadata.position = findSmartNearbySpot(parentWitness, current);
+              console.log('🎯 Relocated connected witness to smart nearby spot:', witness.metadata.position);
+            }
+            return current;
+          });
+        }
       } 
       // Handle new object format
       else if (typeof data === 'object' && data.id) {
@@ -850,6 +889,18 @@ export const initializeStore = () => {
             } : undefined
           }
         };
+        
+        // Override network position for connected witnesses with smart nearby placement
+        if (witness.contextOf) {
+          witnesses.update(current => {
+            const parentWitness = current.find(w => w.id === witness.contextOf);
+            if (parentWitness && parentWitness.metadata.position) {
+              witness.metadata.position = findSmartNearbySpot(parentWitness, current);
+              console.log('🎯 Relocated connected witness to smart nearby spot:', witness.metadata.position);
+            }
+            return current;
+          });
+        }
       } else {
         console.warn('Skipping invalid data format:', data);
         return; // Skip invalid data

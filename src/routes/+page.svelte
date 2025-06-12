@@ -257,6 +257,7 @@
     const handleResize = () => updateFieldSize();
     window.addEventListener('resize', handleResize);
     
+    
     // Physics simulation for smooth drift
     const physicsInterval = setInterval(() => {
       witnesses.update(current => 
@@ -318,9 +319,9 @@
               const dy = parentWitness.metadata.position.y - witness.metadata.position.y;
               const distance = Math.sqrt(dx * dx + dy * dy);
               
-              // Apply gentle pull force if drifting too far (>12% apart, tighter bond)
-              if (distance > 12) {
-                const pullStrength = Math.min(0.03, (distance - 12) * 0.002); // Stronger pull for connected witnesses
+              // Apply gentle pull force if drifting too far (>3% apart, matches smart placement)
+              if (distance > 3) {
+                const pullStrength = Math.min(0.01, (distance - 3) * 0.0008); // Even gentler pull
                 velocity.vx += (dx / distance) * pullStrength;
                 velocity.vy += (dy / distance) * pullStrength;
               }
