@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { witnesses, addWitness, reWitness, initializeStore, getActiveWitnesses, connectionStatus } from '../lib/witnessStore.js';
+  import { witnesses, addWitness, reWitness, initializeStore, getActiveWitnesses, connectionStatus } from '../lib/witnessStore-emergency.js';
   import type { Witness } from '../lib/types.js';
 
   let witnessText = '';
@@ -1068,7 +1068,7 @@
       {/if}
     </div>
     <div class="mb-2 text-xs opacity-80">
-      Mode: <strong>PUBLIC_RELAY</strong> (collective P2P experience)
+      Mode: <strong>EMERGENCY_RELAY</strong> (temporary clean slate)
     </div>
     <p>Collective consciousness emerges through shared witnessing.</p>
   </div>

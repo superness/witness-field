@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Storage Cleanup - Witness Field</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div class="container mx-auto p-4 max-w-4xl">
+    <div class="bg-white rounded-lg shadow-lg p-6">
+      <h1 class="text-2xl font-bold mb-4 text-red-600">Storage Cleanup Tool</h1>
+      
+      <!-- Warning -->
+      <div class="bg-red-50 border border-red-200 rounded p-4 mb-6">
+        <h2 class="font-semibold mb-2 text-red-800">⚠️ Warning</h2>
+        <p class="text-sm text-red-700">This will clean up corrupted data and versioned witness spam. Use with caution.</p>
+      </div>
+      
+      <!-- Status -->
+      <div class="bg-gray-100 p-4 rounded mb-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div>
+            <strong>localStorage Usage:</strong> <span id="storageUsage">Calculating...</span>
+          </div>
+          <div>
+            <strong>Gun Connection:</strong> <span id="connectionStatus">Disconnected</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Actions -->
+      <div class="space-y-4 mb-6">
+        <button 
+          id="analyzeButton"
+          class="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+        >
+          1. Analyze Storage Issues
+        </button>
+        
+        <button 
+          id="cleanupLocalButton"
+          class="w-full px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600"
+          disabled
+        >
+          2. Clean localStorage (Local Only)
+        </button>
+        
+        <button 
+          id="cleanupGunButton"
+          class="w-full px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+          disabled
+        >
+          3. Clean Gun.js Storage (Network)
+        </button>
+        
+        <button 
+          id="testSyncButton"
+          class="w-full px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+          disabled
+        >
+          4. Test Sync After Cleanup
+        </button>
+      </div>
+      
+      <!-- Analysis Results -->
+      <div id="analysisResults" class="bg-gray-50 p-4 rounded mb-6 hidden">
+        <h3 class="font-semibold mb-2">Analysis Results:</h3>
+        <div id="analysisContent"></div>
+      </div>
+      
+      <!-- Real-time Logs -->
+      <div class="bg-black text-green-400 font-mono text-xs p-4 rounded h-64 overflow-y-auto">
+        <div id="logContainer">
+          <div class="text-gray-500">Cleanup logs will appear here...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let gun;
+    let logs = [];
+    
+    // DOM elements
+    const elements = {
+      storageUsage: document.getElementById('storageUsage'),
+      connectionStatus: document.getElementById('connectionStatus'),
+      analyzeButton: document.getElementById('analyzeButton'),
+      cleanupLocalButton: document.getElementById('cleanupLocalButton'),
+      cleanupGunButton: document.getElementById('cleanupGunButton'),
+      testSyncButton: document.getElementById('testSyncButton'),
+      analysisResults: document.getElementById('analysisResults'),
+      analysisContent: document.getElementById('analysisContent'),
+      logContainer: document.getElementById('logContainer')
+    };
+    
+    function addLog(type, message, data = null) {
+      const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+      const logEntry = { timestamp, type, message, data };
+      logs = [logEntry, ...logs.slice(0, 99)]; // Keep last 100 logs
+      console.log(`[${timestamp}] [${type}] ${message}`, data || '');
+      updateLogDisplay();
+    }
+    
+    function updateLogDisplay() {
+      if (logs.length === 0) {
+        elements.logContainer.innerHTML = '<div class="text-gray-500">Cleanup logs will appear here...</div>';
+        return;
+      }
+      
+      elements.logContainer.innerHTML = logs.map(log => `
+        <div class="mb-1">
+          <span class="text-gray-400">[${log.timestamp}]</span>
+          <span class="text-yellow-400">[${log.type}]</span>
+          <span class="text-white">${log.message}</span>
+          ${log.data ? `<span class="text-blue-400">${JSON.stringify(log.data)}</span>` : ''}
+        </div>
+      `).join('');
+      
+      elements.logContainer.scrollTop = 0;
+    }
+    
+    function calculateStorageUsage() {
+      try {
+        let total = 0;
+        for (let key in localStorage) {
+          if (localStorage.hasOwnProperty(key)) {
+            total += localStorage[key].length + key.length;
+          }
+        }
+        const mb = (total / (1024 * 1024)).toFixed(2);
+        elements.storageUsage.textContent = `${mb}MB (${Object.keys(localStorage).length} keys)`;
+        addLog('STORAGE', `localStorage usage: ${mb}MB with ${Object.keys(localStorage).length} keys`);
+        return { totalMB: parseFloat(mb), keyCount: Object.keys(localStorage).length };
+      } catch (e) {
+        elements.storageUsage.textContent = 'Error calculating';
+        addLog('ERROR', 'Failed to calculate storage usage', e.message);
+        return { totalMB: 0, keyCount: 0 };
+      }
+    }
+    
+    function initializeGun() {
+      addLog('INIT', 'Initializing Gun connection...');
+      
+      gun = Gun({
+        peers: [
+          'https://the-witness-field-production.up.railway.app/gun',
+          'wss://the-witness-field-production.up.railway.app/gun'
+        ],
+        localStorage: false, // Don't auto-sync to prevent corruption
+        radisk: false,
+        retry: 1,
+        timeout: 5000
+      });
+      
+      gun.on('hi', (peer) => {
+        if (peer && peer.url) {
+          addLog('CONNECT', `Connected to: ${peer.url}`);
+          elements.connectionStatus.textContent = 'Connected';
+          elements.connectionStatus.className = 'text-green-600';
+        }
+      });
+      
+      gun.on('bye', (peer) => {
+        if (peer && peer.url) {
+          addLog('DISCONNECT', `Disconnected from: ${peer.url}`);
+          elements.connectionStatus.textContent = 'Disconnected';
+          elements.connectionStatus.className = 'text-red-600';
+        }
+      });
+    }
+    
+    async function analyzeStorage() {
+      addLog('ANALYZE', 'Starting storage analysis...');
+      
+      // Calculate storage usage
+      const usage = calculateStorageUsage();
+      
+      // Analyze localStorage keys
+      const gunKeys = [];
+      const witnessKeys = [];
+      const versionedKeys = [];
+      
+      for (let key in localStorage) {
+        if (key.startsWith('gun/')) {
+          gunKeys.push(key);
+        }
+        if (key.includes('witness') || key.length === 17) { // Witness ID format
+          witnessKeys.push(key);
+          if (key.includes('-v') && key.match(/-v\\d+$/)) {
+            versionedKeys.push(key);
+          }
+        }
+      }
+      
+      addLog('ANALYZE', `Found ${gunKeys.length} Gun keys, ${witnessKeys.length} witness keys, ${versionedKeys.length} versioned copies`);
+      
+      // Analyze Gun data corruption
+      let corruptedWitnesses = 0;
+      let validWitnesses = 0;
+      
+      witnessKeys.forEach(key => {
+        try {
+          const data = localStorage.getItem(key);
+          if (data) {
+            const parsed = JSON.parse(data);
+            // Check if it's a complete witness
+            if (parsed.id && parsed.text && parsed.createdAt) {
+              validWitnesses++;
+            } else {
+              corruptedWitnesses++;
+              addLog('CORRUPT', `Corrupted witness data in key: ${key}`, parsed);
+            }
+          }
+        } catch (e) {
+          corruptedWitnesses++;
+          addLog('CORRUPT', `Invalid JSON in key: ${key}`);
+        }
+      });
+      
+      // Display analysis results
+      const analysisHTML = `
+        <div class="space-y-2 text-sm">
+          <div><strong>Total Storage:</strong> ${usage.totalMB}MB (${usage.keyCount} keys)</div>
+          <div><strong>Gun Keys:</strong> ${gunKeys.length}</div>
+          <div><strong>Witness Keys:</strong> ${witnessKeys.length}</div>
+          <div><strong>Versioned Copies:</strong> ${versionedKeys.length}</div>
+          <div><strong>Valid Witnesses:</strong> ${validWitnesses}</div>
+          <div><strong>Corrupted Witnesses:</strong> ${corruptedWitnesses}</div>
+          <div class="pt-2">
+            <strong>Recommendations:</strong>
+            <ul class="list-disc list-inside ml-4">
+              ${usage.totalMB > 5 ? '<li class="text-red-600">Storage usage is high - cleanup recommended</li>' : ''}
+              ${versionedKeys.length > 50 ? '<li class="text-red-600">Too many versioned copies - cleanup needed</li>' : ''}
+              ${corruptedWitnesses > 0 ? '<li class="text-red-600">Corrupted data found - cleanup required</li>' : ''}
+            </ul>
+          </div>
+        </div>
+      `;
+      
+      elements.analysisContent.innerHTML = analysisHTML;
+      elements.analysisResults.classList.remove('hidden');
+      
+      // Enable cleanup buttons
+      elements.cleanupLocalButton.disabled = false;
+      elements.cleanupGunButton.disabled = false;
+      
+      addLog('ANALYZE', 'Analysis complete');
+      
+      return {
+        usage,
+        gunKeys: gunKeys.length,
+        witnessKeys: witnessKeys.length,
+        versionedKeys: versionedKeys.length,
+        corruptedWitnesses,
+        validWitnesses
+      };
+    }
+    
+    function cleanupLocalStorage() {
+      addLog('CLEANUP', 'Starting localStorage cleanup...');
+      
+      let removedCount = 0;
+      const keysToRemove = [];
+      
+      // Find keys to remove
+      for (let key in localStorage) {
+        // Remove versioned witness copies
+        if (key.includes('-v') && key.match(/-v\\d+$/)) {
+          keysToRemove.push(key);
+        }
+        
+        // Remove corrupted Gun data
+        if (key.startsWith('gun/')) {
+          try {
+            const data = localStorage.getItem(key);
+            if (!data || data === 'null' || data === 'undefined') {
+              keysToRemove.push(key);
+            }
+          } catch (e) {
+            keysToRemove.push(key);
+          }
+        }
+        
+        // Remove old or corrupted witness data
+        if (key.length === 17) { // Witness ID format
+          try {
+            const data = localStorage.getItem(key);
+            if (data) {
+              const parsed = JSON.parse(data);
+              // Remove if missing essential fields or very old
+              if (!parsed.id || !parsed.text || !parsed.createdAt || 
+                  (Date.now() - parsed.createdAt > 7 * 24 * 60 * 60 * 1000)) { // 7 days
+                keysToRemove.push(key);
+              }
+            }
+          } catch (e) {
+            keysToRemove.push(key);
+          }
+        }
+      }
+      
+      // Remove the keys
+      keysToRemove.forEach(key => {
+        try {
+          localStorage.removeItem(key);
+          removedCount++;
+          addLog('REMOVE', `Removed localStorage key: ${key}`);
+        } catch (e) {
+          addLog('ERROR', `Failed to remove key: ${key}`, e.message);
+        }
+      });
+      
+      addLog('CLEANUP', `localStorage cleanup complete: removed ${removedCount} keys`);
+      calculateStorageUsage(); // Recalculate
+      
+      // Enable test button
+      elements.testSyncButton.disabled = false;
+    }
+    
+    async function cleanupGunStorage() {
+      if (!gun) {
+        addLog('ERROR', 'Gun not connected');
+        return;
+      }
+      
+      addLog('CLEANUP', 'Starting Gun.js storage cleanup...');
+      
+      const fieldNode = gun.get('witness-field-collective-public-v3');
+      let removedCount = 0;
+      
+      // Scan and remove versioned copies and corrupted data
+      fieldNode.map().once((data, key) => {
+        if (!data) return;
+        
+        // Remove versioned copies
+        if (key.includes('-v') && key.match(/-v\\d+$/)) {
+          addLog('REMOVE', `Removing versioned copy: ${key}`);
+          fieldNode.get(key).put(null);
+          removedCount++;
+          return;
+        }
+        
+        // Remove corrupted witness data
+        if (typeof data === 'object' && (!data.id || !data.text)) {
+          addLog('REMOVE', `Removing corrupted data: ${key}`, data);
+          fieldNode.get(key).put(null);
+          removedCount++;
+          return;
+        }
+        
+        // Remove very old data (7+ days)
+        if (data.createdAt && (Date.now() - data.createdAt > 7 * 24 * 60 * 60 * 1000)) {
+          addLog('REMOVE', `Removing old data: ${key} (${new Date(data.createdAt).toISOString()})`);
+          fieldNode.get(key).put(null);
+          removedCount++;
+          return;
+        }
+      });
+      
+      // Wait a bit for operations to complete
+      setTimeout(() => {
+        addLog('CLEANUP', `Gun.js cleanup complete: removed ~${removedCount} items`);
+        elements.testSyncButton.disabled = false;
+      }, 3000);
+    }
+    
+    function testSyncAfterCleanup() {
+      addLog('TEST', 'Testing sync after cleanup...');
+      
+      const testData = {
+        id: 'cleanup-test-' + Date.now(),
+        message: 'Cleanup test message',
+        timestamp: Date.now()
+      };
+      
+      if (gun) {
+        const testNode = gun.get('cleanup-test-namespace');
+        testNode.get(testData.id).put(testData);
+        addLog('TEST', 'Test message sent to Gun.js');
+        
+        // Listen for the message to come back
+        testNode.get(testData.id).on((data) => {
+          if (data && data.id === testData.id) {
+            addLog('SUCCESS', 'Test sync working! Data received back from Gun.js');
+          }
+        });
+      }
+      
+      addLog('TEST', 'Open sync-test.html in another browser to verify cross-device sync');
+    }
+    
+    // Event listeners
+    elements.analyzeButton.addEventListener('click', analyzeStorage);
+    elements.cleanupLocalButton.addEventListener('click', cleanupLocalStorage);
+    elements.cleanupGunButton.addEventListener('click', cleanupGunStorage);
+    elements.testSyncButton.addEventListener('click', testSyncAfterCleanup);
+    
+    // Initialize
+    calculateStorageUsage();
+    initializeGun();
+    addLog('READY', 'Cleanup tool ready - start with analysis');
+  </script>
+</body>
+</html>
