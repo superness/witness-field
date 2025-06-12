@@ -248,7 +248,7 @@ class WitnessAgent {
         id: generateId(),
         text: text.trim(),
         createdAt: now,
-        expiresAt: now + (5 * 60 * 1000), // 5 minutes
+        expiresAt: now + (30 * 60 * 1000), // 30 minutes for testing
         witnessCount: 1,
         lastWitnessed: now,
         contextOf: this.conversationContext,
@@ -342,7 +342,7 @@ class WitnessAgent {
       id: generateId(),
       text: responseText.trim(),
       createdAt: now,
-      expiresAt: now + (5 * 60 * 1000),
+      expiresAt: now + (30 * 60 * 1000), // 30 minutes for testing
       witnessCount: 1,
       lastWitnessed: now,
       contextOf: contextWitness.id,

@@ -755,8 +755,8 @@ const handleSignalingMessage = async (message: any, fromPeer: string) => {
 export const initializeStore = () => {
   console.log('Initializing Gun P2P network and localStorage...');
   
-  // Load existing witnesses on startup - handle both old string format and new object format
-  fieldNode.map().on((data, key) => {
+  // Load existing witnesses on startup AND listen for new ones
+  const loadWitnessData = (data, key) => {
     if (!data) return;
     
     // Skip non-witness data (WebRTC signaling, peer discovery, etc.)
@@ -879,7 +879,15 @@ export const initializeStore = () => {
     } catch (e) {
       console.warn('Failed to parse witness data:', e, data);
     }
-  });
+  };
+
+  // FIRST: Load existing witnesses immediately (for page refresh)
+  console.log('🔄 Loading existing witnesses...');
+  fieldNode.map().once(loadWitnessData);
+  
+  // SECOND: Listen for new witnesses in real-time
+  console.log('👂 Setting up real-time witness listener...');
+  fieldNode.map().on(loadWitnessData);
   
   // Periodic cleanup of expired witnesses (with deterministic decay)
   setInterval(() => {
