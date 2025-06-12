@@ -169,17 +169,16 @@
     initializeStore();
     updateFieldSize();
     
-    // Auto-center on a witness for mobile users when page loads
-    if (window.innerWidth < 768) {
-      setTimeout(() => {
-        const activeWitnesses = getActiveWitnesses($witnesses);
-        if (activeWitnesses.length > 0) {
-          // Pick a random witness to center on
-          const randomWitness = activeWitnesses[Math.floor(Math.random() * activeWitnesses.length)];
-          centerWitness(randomWitness);
-        }
-      }, 1000); // Give time for witnesses to load
-    }
+    // Auto-center on a random witness when page loads (for all devices)
+    setTimeout(() => {
+      const activeWitnesses = getActiveWitnesses($witnesses);
+      if (activeWitnesses.length > 0) {
+        // Pick a random witness to center on
+        const randomWitness = activeWitnesses[Math.floor(Math.random() * activeWitnesses.length)];
+        centerWitness(randomWitness);
+        console.log('🎯 Auto-centered on random witness:', randomWitness.text.substring(0, 30) + '...');
+      }
+    }, 1000); // Give time for witnesses to load
     
     // Add resize listener
     const handleResize = () => updateFieldSize();
