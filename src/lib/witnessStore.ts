@@ -754,11 +754,10 @@ export const reWitness = async (witnessId: string): Promise<void> => {
     // Store complete witness again (treat update like creation)
     witnessNode.put(gunData);
     
-    // Also create a versioned copy to ensure propagation
-    const versionedKey = `${witnessId}-v${witness.witnessCount}`;
-    fieldNode.get(versionedKey).put(gunData);
+    // REMOVED: Versioned copies cause storage spam and corruption
+    // Don't create versioned copies - rely on Gun.js native conflict resolution
     
-    console.log('📡 Created versioned witness:', versionedKey, 'with lastUpdate:', gunData.lastUpdate);
+    console.log('📡 Updated witness in Gun.js:', witness.id, 'with lastUpdate:', gunData.lastUpdate);
   }
 };
 
@@ -882,8 +881,8 @@ const cleanupExpiredWitnesses = () => {
       return;
     }
     
-    // Check if this looks like witness data
-    if (typeof data === 'object' && data.expiresAt && data.id) {
+    // Check if this looks like witness data (validate essential fields)
+    if (typeof data === 'object' && data.expiresAt && data.id && data.text && data.createdAt) {
       // If expired by more than 1 hour (grace period for sync), remove it
       const gracePeriod = 60 * 60 * 1000; // 1 hour
       if (now > (data.expiresAt + gracePeriod)) {
@@ -892,8 +891,8 @@ const cleanupExpiredWitnesses = () => {
         // Remove from Gun.js by setting to null
         fieldNode.get(key).put(null);
         
-        // Also remove any versioned copies
-        for (let v = 1; v <= (data.witnessCount || 1) + 5; v++) {
+        // Clean up any existing versioned copies (legacy cleanup)
+        for (let v = 1; v <= 50; v++) { // Clean up to 50 versions
           fieldNode.get(`${key}-v${v}`).put(null);
         }
         
@@ -905,6 +904,25 @@ const cleanupExpiredWitnesses = () => {
   // Report results after a delay to let the scan complete
   setTimeout(() => {
     console.log(`🧹 Cleanup completed: removed ${cleanedCount} expired witnesses`);
+    
+    // Check localStorage after Gun cleanup and run additional cleanup if needed
+    setTimeout(() => {
+      try {
+        let totalSize = 0;
+        for (let key in localStorage) {
+          if (localStorage.hasOwnProperty(key)) {
+            totalSize += localStorage[key].length + key.length;
+          }
+        }
+        const sizeMB = totalSize / (1024 * 1024);
+        if (sizeMB > 5) { // If still over 5MB, force aggressive cleanup
+          console.warn(`⚠️ localStorage still large (${sizeMB.toFixed(2)}MB) - running aggressive cleanup`);
+          cleanupCorruptedLocalStorage();
+        }
+      } catch (e) {
+        console.warn('Failed to check localStorage size after cleanup');
+      }
+    }, 2000);
   }, 5000);
 };
 
@@ -925,8 +943,94 @@ const startPeriodicCleanup = () => {
 // Track Gun.js subscriptions for cleanup
 let gunSubscriptions: any[] = [];
 
+// Auto-cleanup localStorage on startup
+const cleanupCorruptedLocalStorage = () => {
+  console.log('🧹 Auto-cleaning corrupted localStorage...');
+  
+  try {
+    let removedCount = 0;
+    const keysToRemove: string[] = [];
+    
+    // Check localStorage usage
+    let totalSize = 0;
+    for (let key in localStorage) {
+      if (localStorage.hasOwnProperty(key)) {
+        totalSize += localStorage[key].length + key.length;
+      }
+    }
+    const sizeMB = totalSize / (1024 * 1024);
+    console.log(`📊 localStorage: ${sizeMB.toFixed(2)}MB with ${Object.keys(localStorage).length} keys`);
+    
+    // Find problematic keys
+    for (let key in localStorage) {
+      try {
+        // Remove versioned witness copies (these cause the spam)
+        if (key.includes('-v') && key.match(/-v\d+$/)) {
+          keysToRemove.push(key);
+          continue;
+        }
+        
+        // Remove corrupted Gun data
+        if (key.startsWith('gun/')) {
+          const data = localStorage.getItem(key);
+          if (!data || data === 'null' || data === 'undefined' || data.length < 10) {
+            keysToRemove.push(key);
+            continue;
+          }
+        }
+        
+        // Remove old/corrupted witness data  
+        if (key.length === 17) { // Witness ID format
+          const data = localStorage.getItem(key);
+          if (data) {
+            const parsed = JSON.parse(data);
+            // Remove if missing essential fields or very old (7+ days)
+            if (!parsed.id || !parsed.text || !parsed.createdAt || 
+                (Date.now() - parsed.createdAt > 7 * 24 * 60 * 60 * 1000)) {
+              keysToRemove.push(key);
+            }
+          }
+        }
+      } catch (e) {
+        // If we can't parse it, it's corrupted
+        keysToRemove.push(key);
+      }
+    }
+    
+    // Remove the problematic keys
+    keysToRemove.forEach(key => {
+      try {
+        localStorage.removeItem(key);
+        removedCount++;
+      } catch (e) {
+        console.warn('Failed to remove localStorage key:', key);
+      }
+    });
+    
+    if (removedCount > 0) {
+      console.log(`🧹 Auto-cleanup complete: removed ${removedCount} corrupted keys`);
+      
+      // Recalculate storage after cleanup
+      let newTotalSize = 0;
+      for (let key in localStorage) {
+        if (localStorage.hasOwnProperty(key)) {
+          newTotalSize += localStorage[key].length + key.length;
+        }
+      }
+      const newSizeMB = newTotalSize / (1024 * 1024);
+      console.log(`📊 localStorage after cleanup: ${newSizeMB.toFixed(2)}MB with ${Object.keys(localStorage).length} keys`);
+    }
+    
+  } catch (e) {
+    console.warn('Auto-cleanup failed:', e);
+  }
+};
+
 export const initializeStore = () => {
   console.log('Initializing Gun P2P network and localStorage...');
+  
+  // Auto-cleanup corrupted localStorage on startup
+  cleanupCorruptedLocalStorage();
   
   // Clean up any existing subscriptions
   gunSubscriptions.forEach(sub => {
@@ -996,8 +1100,20 @@ export const initializeStore = () => {
         console.log('Loading witness from object format:', data);
         
         // Skip incomplete data that's missing essential fields (Gun.js loads incrementally)
-        if (!data.text || !data.createdAt || !data.expiresAt) {
-          console.log('Skipping incomplete witness data (will be loaded again when complete):', data.id);
+        if (!data.text || !data.createdAt || !data.expiresAt || !data.id) {
+          console.log('Skipping incomplete witness data (missing essential fields):', data.id || 'no-id');
+          return;
+        }
+        
+        // Skip corrupted data (fragments with only metadata)
+        if (typeof data.text !== 'string' || data.text.length === 0) {
+          console.log('Skipping corrupted witness data (invalid text):', data.id);
+          return;
+        }
+        
+        // Skip data with invalid timestamps
+        if (typeof data.createdAt !== 'number' || typeof data.expiresAt !== 'number') {
+          console.log('Skipping witness with invalid timestamps:', data.id);
           return;
         }
         
@@ -1194,6 +1310,11 @@ export const initializeStore = () => {
   
   // Start periodic cleanup of expired witnesses
   startPeriodicCleanup();
+  
+  // Auto-cleanup localStorage periodically (every 5 minutes)
+  setInterval(() => {
+    cleanupCorruptedLocalStorage();
+  }, 5 * 60 * 1000);
   
   // Initialize WebRTC P2P connections
   if (typeof window !== 'undefined') {
