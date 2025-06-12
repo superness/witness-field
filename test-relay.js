@@ -9,8 +9,8 @@ const gun = Gun({
 gun.on('hi', (peer) => console.log('🟢 Connected to:', peer.url || 'localStorage'));
 gun.on('bye', (peer) => console.log('🔴 Disconnected from:', peer.url || 'peer'));
 
-const fieldNode = gun.get('witness-field-collective-public-v2');
-console.log('📡 Listening for witnesses in namespace: witness-field-collective-public-v2');
+const fieldNode = gun.get('witness-field-collective-public-v3');
+console.log('📡 Listening for witnesses in namespace: witness-field-collective-public-v3');
 
 let witnessCount = 0;
 fieldNode.map().on((data, key) => {
