@@ -11,37 +11,54 @@
 	let showExpired = true;
 	let searchQuery = '';
 	
-	// Initialize Gun with same config as main app
-	const gun = Gun({
-		peers: [
-			'https://the-witness-field-production.up.railway.app/gun',
-			'wss://the-witness-field-production.up.railway.app/gun'
-		],
-		localStorage: true,
-		radisk: true,
-		retry: 1,
-		timeout: 5000
-	});
+	// Stress test state
+	let stressTestRunning = false;
+	let stressTestAgents = 20;
+	let stressTestDuration = 300; // 5 minutes in seconds
+	let stressTestStartTime = 0;
+	let stressTestStats = {
+		witnessesCreated: 0,
+		rewitnessesPerformed: 0,
+		elapsed: 0,
+		agentsActive: 0
+	};
 	
-	// Add more detailed connection logging
-	gun.on('hi', (peer) => {
-		if (peer && peer.url) {
-			console.log('🟢 Gun connected to peer:', peer.url);
-			gunConnected = true;
-		} else {
-			console.log('💾 Gun localStorage ready');
-			gunConnected = true; // Count localStorage as connected
-		}
-	});
+	// Initialize Gun only in browser
+	let gun: any = null;
 	
-	gun.on('bye', (peer) => {
-		if (peer && peer.url) {
-			console.log('🔴 Gun disconnected from peer:', peer.url);
-		} else {
-			console.log('⚠️ Gun peer connection lost');
-		}
-		gunConnected = false;
-	});
+	// Browser-only initialization
+	if (typeof window !== 'undefined') {
+		gun = Gun({
+			peers: [
+				'https://the-witness-field-production.up.railway.app/gun',
+				'wss://the-witness-field-production.up.railway.app/gun'
+			],
+			localStorage: true,
+			radisk: true,
+			retry: 1,
+			timeout: 5000
+		});
+		
+		// Add more detailed connection logging
+		gun.on('hi', (peer: any) => {
+			if (peer && peer.url) {
+				console.log('🟢 Gun connected to peer:', peer.url);
+				gunConnected = true;
+			} else {
+				console.log('💾 Gun localStorage ready');
+				gunConnected = true; // Count localStorage as connected
+			}
+		});
+		
+		gun.on('bye', (peer: any) => {
+			if (peer && peer.url) {
+				console.log('🔴 Gun disconnected from peer:', peer.url);
+			} else {
+				console.log('⚠️ Gun peer connection lost');
+			}
+			gunConnected = false;
+		});
+	}
 	
 	onMount(() => {
 		loadAllWitnesses();
@@ -53,6 +70,12 @@
 			allWitnesses = [];
 			
 			console.log('🔍 Starting debug witness loading...');
+			
+			if (!gun) {
+				console.log('⚠️ Gun not initialized yet');
+				loading = false;
+				return;
+			}
 			
 			// Load from Gun - using v3 namespace to match main app  
 			const fieldNode = gun.get('witness-field-collective-public-v3');
@@ -153,8 +176,8 @@
 				loading = false;
 			}, 3000);
 			
-			// Also load from localStorage
-			const localData = localStorage.getItem('witness-field-data');
+			// Also load from localStorage (browser only)
+			const localData = typeof window !== 'undefined' ? localStorage.getItem('witness-field-data') : null;
 			if (localData) {
 				try {
 					const parsed = JSON.parse(localData);
@@ -195,15 +218,86 @@
 	}
 	
 	function clearLocalStorage() {
+		if (typeof window === 'undefined') {
+			alert('Not available during server-side rendering');
+			return;
+		}
+		
 		if (confirm('This will clear all locally stored witness data. Are you sure?')) {
 			localStorage.removeItem('witness-field-data');
 			alert('Local storage cleared. Refresh to reload from peers.');
 		}
 	}
 	
-	function createTestWitness() {
+	// Copy the proof-of-work functions from witnessStore
+	const computeProofOfWork = async (text: string): Promise<{nonce: number, hash: string}> => {
+		return new Promise((resolve) => {
+			const startTime = Date.now();
+			let nonce = 0;
+			
+			const compute = () => {
+				// Compute hash with nonce
+				const data = text + nonce;
+				let hash = 0;
+				
+				for (let j = 0; j < data.length; j++) {
+					hash = ((hash << 5) - hash + data.charCodeAt(j)) & 0xffffffff;
+				}
+				
+				// Add extra computational work to reach ~1 second
+				for (let k = 0; k < 10000; k++) {
+					hash = (hash * 1103515245 + 12345) & 0xffffffff;
+				}
+				
+				// Check if we've hit our time target
+				if (Date.now() - startTime >= 1000) {
+					// Ensure consistent hash representation (handle negative numbers)
+					const finalHash = (hash >>> 0).toString(16);
+					resolve({ nonce, hash: finalHash });
+					return;
+				}
+				
+				nonce++;
+				
+				// Continue computation in next tick to avoid blocking
+				setTimeout(compute, 0);
+			};
+			
+			compute();
+		});
+	};
+
+	// Copy the proof-of-work verification function
+	const verifyProofOfWork = (text: string, proof: {nonce: number, hash: string}): boolean => {
+		const data = text + proof.nonce;
+		let hash = 0;
+		
+		for (let j = 0; j < data.length; j++) {
+			hash = ((hash << 5) - hash + data.charCodeAt(j)) & 0xffffffff;
+		}
+		
+		for (let k = 0; k < 10000; k++) {
+			hash = (hash * 1103515245 + 12345) & 0xffffffff;
+		}
+		
+		// Handle both signed and unsigned hash representations
+		const calculatedHashSigned = hash.toString(16);
+		const calculatedHashUnsigned = (hash >>> 0).toString(16);
+		return calculatedHashSigned === proof.hash || calculatedHashUnsigned === proof.hash;
+	};
+
+	async function createTestWitness() {
+		if (!gun) {
+			alert('Gun not initialized yet');
+			return;
+		}
+		
 		const testText = `DEBUG_TEST_${Date.now()}`;
-		console.log('Creating test witness:', testText);
+		console.log('Creating test witness with valid PoW:', testText);
+		
+		// Compute real proof of work (~1 second)
+		const proof = await computeProofOfWork(testText.trim());
+		console.log('Proof of work completed:', proof);
 		
 		const fieldNode = gun.get('witness-field-collective-public-v3');
 		const witnessId = 'test_' + Math.random().toString(36).substr(2, 9);
@@ -217,8 +311,8 @@
 			witnessCount: 1,
 			lastWitnessed: now,
 			contextOf: null,
-			proofNonce: null,
-			proofHash: null,
+			proofNonce: proof.nonce,
+			proofHash: proof.hash,
 			entropySeed: Math.random(),
 			contextTag: null,
 			positionX: 50 + (Math.random() - 0.5) * 40,
@@ -226,7 +320,214 @@
 		};
 		
 		fieldNode.get(witnessId).put(testWitness);
-		console.log('Test witness created:', testWitness);
+		console.log('Test witness created with valid PoW:', testWitness);
+	}
+	
+	
+	// Sample agent personas and behaviors
+	const agentPersonas = [
+		{ name: 'Philosopher', topics: ['existence', 'consciousness', 'meaning', 'reality', 'truth', 'wisdom'] },
+		{ name: 'Scientist', topics: ['discovery', 'hypothesis', 'experiment', 'observation', 'theory', 'data'] },
+		{ name: 'Artist', topics: ['creation', 'beauty', 'expression', 'inspiration', 'vision', 'emotion'] },
+		{ name: 'Wanderer', topics: ['journey', 'exploration', 'unknown', 'path', 'adventure', 'freedom'] },
+		{ name: 'Dreamer', topics: ['possibility', 'imagination', 'hope', 'future', 'wonder', 'aspiration'] },
+		{ name: 'Observer', topics: ['silence', 'watching', 'patterns', 'stillness', 'awareness', 'presence'] },
+		{ name: 'Storyteller', topics: ['narrative', 'memory', 'legend', 'tale', 'history', 'myth'] },
+		{ name: 'Seeker', topics: ['question', 'search', 'mystery', 'understanding', 'quest', 'discovery'] }
+	];
+	
+	const witnessTemplates = [
+		"In the {topic} of today, I witness {observation}",
+		"The {topic} reveals itself as {insight}",
+		"Through {perspective}, {topic} becomes {realization}",
+		"Witnessing {moment} in the context of {topic}",
+		"The essence of {topic} flows through {experience}",
+		"In {state}, {topic} transforms into {understanding}",
+		"Between {concept1} and {concept2}, {topic} emerges",
+		"The rhythm of {topic} speaks: {message}",
+		"In this moment, {topic} whispers {truth}",
+		"Through the lens of {viewpoint}, {topic} appears as {vision}"
+	];
+	
+	const concepts = [
+		'light', 'shadow', 'time', 'space', 'breath', 'flow', 'balance', 'change',
+		'connection', 'solitude', 'harmony', 'chaos', 'growth', 'decay', 'renewal',
+		'energy', 'stillness', 'movement', 'thought', 'feeling', 'memory', 'dream'
+	];
+	
+	function generateAgentWitness(persona: any): string {
+		const template = witnessTemplates[Math.floor(Math.random() * witnessTemplates.length)];
+		const topic = persona.topics[Math.floor(Math.random() * persona.topics.length)];
+		const concept1 = concepts[Math.floor(Math.random() * concepts.length)];
+		const concept2 = concepts[Math.floor(Math.random() * concepts.length)];
+		
+		return template
+			.replace('{topic}', topic)
+			.replace('{observation}', concept1 + ' dancing with ' + concept2)
+			.replace('{insight}', 'a reflection of our shared ' + concept1)
+			.replace('{perspective}', persona.name.toLowerCase() + "'s gaze")
+			.replace('{realization}', 'the interconnected nature of ' + concept1)
+			.replace('{moment}', 'this fleeting ' + concept1)
+			.replace('{experience}', 'waves of ' + concept1)
+			.replace('{state}', 'deep ' + concept1)
+			.replace('{understanding}', 'pure ' + concept1)
+			.replace('{concept1}', concept1)
+			.replace('{concept2}', concept2)
+			.replace('{message}', concept1 + ' seeks ' + concept2)
+			.replace('{truth}', concept1 + ' is ' + concept2)
+			.replace('{viewpoint}', concept1)
+			.replace('{vision}', 'luminous ' + concept1);
+	}
+	
+	async function startStressTest() {
+		if (!gun) {
+			alert('Gun not initialized yet');
+			return;
+		}
+		
+		stressTestRunning = true;
+		stressTestStartTime = Date.now();
+		stressTestStats = {
+			witnessesCreated: 0,
+			rewitnessesPerformed: 0,
+			elapsed: 0,
+			agentsActive: 0
+		};
+		
+		console.log(`🚀 Starting stress test with ${stressTestAgents} agents for ${stressTestDuration} seconds`);
+		
+		const fieldNode = gun.get('witness-field-collective-public-v3');
+		const activeAgents = new Set();
+		
+		// Update stats every second
+		const statsInterval = setInterval(() => {
+			if (!stressTestRunning) {
+				clearInterval(statsInterval);
+				return;
+			}
+			
+			stressTestStats.elapsed = Math.floor((Date.now() - stressTestStartTime) / 1000);
+			stressTestStats.agentsActive = activeAgents.size;
+			stressTestStats = { ...stressTestStats }; // Trigger reactivity
+			
+			if (stressTestStats.elapsed >= stressTestDuration) {
+				stopStressTest();
+			}
+		}, 1000);
+		
+		// Create agent behaviors
+		for (let agentId = 0; agentId < stressTestAgents; agentId++) {
+			const persona = agentPersonas[agentId % agentPersonas.length];
+			const agentName = `${persona.name}_${agentId}`;
+			
+			// Each agent has different timing patterns
+			const baseInterval = 3000 + Math.random() * 7000; // 3-10 seconds
+			const rewitnessChance = 0.3; // 30% chance to rewitness instead of creating
+			
+			const agentLoop = async () => {
+				if (!stressTestRunning) return;
+				
+				activeAgents.add(agentName);
+				
+				try {
+					// Decide whether to create new witness or rewitness existing
+					const shouldRewitness = Math.random() < rewitnessChance && allWitnesses.length > 0;
+					
+					if (shouldRewitness) {
+						// Rewitness a random existing witness
+						const activeWitnesses = allWitnesses.filter(w => !w.expired);
+						if (activeWitnesses.length > 0) {
+							const targetWitness = activeWitnesses[Math.floor(Math.random() * activeWitnesses.length)];
+							
+							// Simulate rewitnessing by updating witness count
+							const updatedWitness = {
+								...targetWitness,
+								witnessCount: targetWitness.witnessCount + 1,
+								lastWitnessed: Date.now()
+							};
+							
+							// Update in Gun
+							fieldNode.get(targetWitness.id).put({
+								id: targetWitness.id,
+								text: targetWitness.text,
+								createdAt: targetWitness.createdAt,
+								expiresAt: targetWitness.expiresAt,
+								witnessCount: updatedWitness.witnessCount,
+								lastWitnessed: updatedWitness.lastWitnessed,
+								contextOf: targetWitness.contextOf || null,
+								proofNonce: targetWitness.proof?.nonce || null,
+								proofHash: targetWitness.proof?.hash || null,
+								entropySeed: targetWitness.metadata?.entropySeed || Math.random(),
+								contextTag: targetWitness.metadata?.contextTag || null,
+								positionX: targetWitness.metadata?.position?.x || null,
+								positionY: targetWitness.metadata?.position?.y || null,
+								lastUpdate: Date.now()
+							});
+							
+							stressTestStats.rewitnessesPerformed++;
+							console.log(`👥 ${agentName} rewitnessed: ${targetWitness.text.substring(0, 30)}...`);
+						}
+					} else {
+						// Create new witness with valid proof-of-work
+						const witnessText = generateAgentWitness(persona);
+						
+						// Compute real proof of work (~1 second) 
+						const proof = await computeProofOfWork(witnessText.trim());
+						
+						const witnessId = `stress_${agentName}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+						const now = Date.now();
+						
+						// Choose context witness sometimes
+						let contextOf = null;
+						if (allWitnesses.length > 0 && Math.random() < 0.4) { // 40% chance of context
+							const activeWitnesses = allWitnesses.filter(w => !w.expired);
+							if (activeWitnesses.length > 0) {
+								contextOf = activeWitnesses[Math.floor(Math.random() * activeWitnesses.length)].id;
+							}
+						}
+						
+						const stressWitness = {
+							id: witnessId,
+							text: witnessText,
+							createdAt: now,
+							expiresAt: now + (10 * 60 * 1000), // 10 minutes for testing
+							witnessCount: 1,
+							lastWitnessed: now,
+							contextOf: contextOf,
+							proofNonce: proof.nonce,
+							proofHash: proof.hash,
+							entropySeed: Math.random(),
+							contextTag: persona.name,
+							positionX: 10 + Math.random() * 80, // Keep in viewable area
+							positionY: 10 + Math.random() * 80
+						};
+						
+						fieldNode.get(witnessId).put(stressWitness);
+						stressTestStats.witnessesCreated++;
+						console.log(`✨ ${agentName} created with valid PoW: ${witnessText.substring(0, 50)}...`);
+					}
+				} catch (error) {
+					console.error(`❌ Agent ${agentName} error:`, error);
+				}
+				
+				// Schedule next action with some randomness
+				if (stressTestRunning) {
+					const nextInterval = baseInterval * (0.8 + Math.random() * 0.4); // ±20% variance
+					setTimeout(agentLoop, nextInterval);
+				} else {
+					activeAgents.delete(agentName);
+				}
+			};
+			
+			// Start each agent with staggered timing
+			setTimeout(agentLoop, Math.random() * 5000);
+		}
+	}
+	
+	function stopStressTest() {
+		stressTestRunning = false;
+		console.log('🛑 Stress test stopped');
+		console.log('📊 Final stats:', stressTestStats);
 	}
 	
 	$: filteredWitnesses = allWitnesses
@@ -286,6 +587,15 @@
 			<span class="status-item">
 				Expired: <strong>{allWitnesses.filter(w => w.expired).length}</strong>
 			</span>
+			<span class="status-item">
+				Valid PoW: <strong class="pow-valid">{allWitnesses.filter(w => w.proof && verifyProofOfWork(w.text.trim(), w.proof)).length}</strong>
+			</span>
+			<span class="status-item">
+				Invalid PoW: <strong class="pow-invalid">{allWitnesses.filter(w => w.proof && !verifyProofOfWork(w.text.trim(), w.proof)).length}</strong>
+			</span>
+			<span class="status-item">
+				No Proof: <strong class="pow-missing">{allWitnesses.filter(w => !w.proof).length}</strong>
+			</span>
 		</div>
 	</header>
 
@@ -317,6 +627,51 @@
 			<button on:click={exportAsJSON}>Export JSON</button>
 			<button on:click={createTestWitness}>Create Test Witness</button>
 			<button on:click={clearLocalStorage} class="danger">Clear Local Storage</button>
+		</div>
+		
+		<div class="stress-test-controls">
+			<h3>🔥 Stress Test</h3>
+			<div class="stress-controls">
+				<label>
+					Agents: 
+					<input type="number" bind:value={stressTestAgents} min="1" max="100" disabled={stressTestRunning} />
+				</label>
+				<label>
+					Duration (seconds): 
+					<input type="number" bind:value={stressTestDuration} min="10" max="3600" disabled={stressTestRunning} />
+				</label>
+				{#if stressTestRunning}
+					<button on:click={stopStressTest} class="danger">Stop Test</button>
+				{:else}
+					<button on:click={startStressTest} class="stress">Start Stress Test</button>
+				{/if}
+			</div>
+			
+			{#if stressTestRunning || stressTestStats.witnessesCreated > 0}
+				<div class="stress-stats">
+					<div class="stat-grid">
+						<div class="stat">
+							<span class="stat-label">Running:</span>
+							<span class="stat-value">{stressTestStats.elapsed}s / {stressTestDuration}s</span>
+						</div>
+						<div class="stat">
+							<span class="stat-label">Active Agents:</span>
+							<span class="stat-value">{stressTestStats.agentsActive}</span>
+						</div>
+						<div class="stat">
+							<span class="stat-label">Witnesses Created:</span>
+							<span class="stat-value">{stressTestStats.witnessesCreated}</span>
+						</div>
+						<div class="stat">
+							<span class="stat-label">Rewitnesses:</span>
+							<span class="stat-value">{stressTestStats.rewitnessesPerformed}</span>
+						</div>
+					</div>
+					<div class="progress-bar">
+						<div class="progress-fill" style="width: {(stressTestStats.elapsed / stressTestDuration) * 100}%"></div>
+					</div>
+				</div>
+			{/if}
 		</div>
 	</div>
 
@@ -357,6 +712,22 @@
 						<div class="meta-row">
 							<span>Witness Count:</span>
 							<span>{witness.witnessCount}</span>
+						</div>
+						<div class="meta-row">
+							<span>Proof of Work:</span>
+							<span class="pow-status">
+								{#if witness.proof}
+									{@const isValid = verifyProofOfWork(witness.text.trim(), witness.proof)}
+									<span class={isValid ? 'pow-valid' : 'pow-invalid'}>
+										{isValid ? '✅ VALID' : '❌ INVALID'}
+									</span>
+									<span class="pow-details">
+										(nonce: {witness.proof.nonce}, hash: {witness.proof.hash})
+									</span>
+								{:else}
+									<span class="pow-missing">❓ NO PROOF</span>
+								{/if}
+							</span>
 						</div>
 						{#if witness.contextOf}
 							<div class="meta-row">
@@ -459,6 +830,125 @@
 	
 	button.danger:hover {
 		background: #fee;
+	}
+	
+	button.stress {
+		color: #f80;
+		border-color: #f80;
+		font-weight: bold;
+	}
+	
+	button.stress:hover {
+		background: #fff8f0;
+	}
+	
+	.stress-test-controls {
+		background: #f0f8ff;
+		border: 2px solid #4a90e2;
+		border-radius: 8px;
+		padding: 1rem;
+		margin-bottom: 2rem;
+	}
+	
+	.stress-test-controls h3 {
+		margin: 0 0 1rem 0;
+		color: #2c5aa0;
+	}
+	
+	.stress-controls {
+		display: flex;
+		gap: 1rem;
+		align-items: center;
+		flex-wrap: wrap;
+		margin-bottom: 1rem;
+	}
+	
+	.stress-controls label {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-weight: bold;
+	}
+	
+	.stress-controls input[type="number"] {
+		width: 80px;
+		padding: 0.25rem;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+	}
+	
+	.stress-stats {
+		border-top: 1px solid #ddd;
+		padding-top: 1rem;
+	}
+	
+	.stat-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+	
+	.stat {
+		background: white;
+		padding: 0.5rem;
+		border-radius: 4px;
+		border: 1px solid #ddd;
+		text-align: center;
+	}
+	
+	.stat-label {
+		display: block;
+		font-size: 0.8rem;
+		color: #666;
+		margin-bottom: 0.25rem;
+	}
+	
+	.stat-value {
+		display: block;
+		font-size: 1.2rem;
+		font-weight: bold;
+		color: #2c5aa0;
+	}
+	
+	.progress-bar {
+		background: #e9ecef;
+		height: 8px;
+		border-radius: 4px;
+		overflow: hidden;
+	}
+	
+	.progress-fill {
+		background: linear-gradient(to right, #4a90e2, #f80);
+		height: 100%;
+		transition: width 0.3s ease;
+	}
+	
+	.pow-status {
+		font-family: monospace;
+		font-size: 0.8rem;
+	}
+	
+	.pow-valid {
+		color: #0a0;
+		font-weight: bold;
+	}
+	
+	.pow-invalid {
+		color: #f00;
+		font-weight: bold;
+	}
+	
+	.pow-missing {
+		color: #fa0;
+		font-weight: bold;
+	}
+	
+	.pow-details {
+		color: #666;
+		font-size: 0.7rem;
+		display: block;
+		margin-top: 0.2rem;
 	}
 	
 	input[type="text"] {

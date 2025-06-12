@@ -313,8 +313,6 @@ const computeProofOfWork = async (text: string): Promise<{nonce: number, hash: s
           hash = (hash * 1103515245 + 12345) & 0xffffffff;
         }
         
-        nonce++;
-        
         // Check if we've hit our time target
         if (Date.now() - startTime >= 1000) {
           // Ensure consistent hash representation (handle negative numbers)
@@ -322,6 +320,8 @@ const computeProofOfWork = async (text: string): Promise<{nonce: number, hash: s
           resolve({ nonce, hash: finalHash });
           return;
         }
+        
+        nonce++;
       }
       
       // Continue computation in next tick to avoid blocking
@@ -861,7 +861,7 @@ export const initializeStore = () => {
         console.log('PoW verification for witness:', witness.id, 'valid:', isValid);
         if (!isValid) {
           console.warn('Skipping witness with invalid PoW');
-          return;
+          return; // Reject witnesses with invalid PoW
         }
       } else {
         console.warn('Witness has no proof data:', witness.id);
