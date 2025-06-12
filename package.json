@@ -1,0 +1,35 @@
+{
+	"name": "witness-field",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"stress-test": "node stress-test.js",
+		"stress-test:small": "node stress-test.js --agents=20 --duration=60",
+		"stress-test:large": "node stress-test.js --agents=200 --duration=300"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-auto": "^6.0.0",
+		"@sveltejs/adapter-static": "^3.0.8",
+		"@sveltejs/kit": "^2.16.0",
+		"@sveltejs/vite-plugin-svelte": "^5.0.0",
+		"@tailwindcss/postcss": "^4.1.9",
+		"@tailwindcss/typography": "^0.5.16",
+		"autoprefixer": "^10.4.21",
+		"postcss": "^8.5.4",
+		"svelte": "^5.0.0",
+		"svelte-check": "^4.0.0",
+		"tailwindcss": "^4.1.9",
+		"typescript": "^5.0.0",
+		"vite": "^6.2.6"
+	},
+	"dependencies": {
+		"gun": "^0.2020.1240"
+	}
+}

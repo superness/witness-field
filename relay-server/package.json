@@ -1,0 +1,16 @@
+{
+  "name": "witness-field-relay",
+  "version": "1.0.0",
+  "description": "Gun.js relay server for Witness Field P2P connections",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "gun": "^0.2020.1240"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
