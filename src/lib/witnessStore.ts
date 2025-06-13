@@ -174,11 +174,14 @@ if (syncChannel) {
     
     switch (type) {
       case 'NEW_WITNESS':
-        console.log('📡 Received new witness from another tab:', data.id);
+        console.log('📡 Received new witness from another tab:', data.id, 'fromTab:', fromTab);
         witnesses.update(current => {
           const existing = current.find(w => w.id === data.id);
           if (!existing) {
+            console.log('✅ Adding witness from BroadcastChannel:', data.id);
             return [...current, data];
+          } else {
+            console.log('🔄 Witness already exists in store:', data.id);
           }
           return current;
         });
@@ -646,13 +649,23 @@ export const addWitness = async (text: string, contextOf?: string): Promise<Witn
   // Update local store
   witnesses.update(current => [...current, witness]);
   
-  // Broadcast to other tabs
+  // Broadcast to other tabs with retry for reliability
   if (syncChannel) {
-    syncChannel.postMessage({
+    const broadcastMessage = {
       type: 'NEW_WITNESS',
       data: witness,
-      fromTab: myTabId
-    });
+      fromTab: myTabId,
+      timestamp: Date.now()
+    };
+    
+    console.log('📡 Broadcasting new witness to other tabs:', witness.id);
+    syncChannel.postMessage(broadcastMessage);
+    
+    // Add a delayed retry to ensure delivery in case of timing issues
+    setTimeout(() => {
+      console.log('📡 Retry broadcast for witness:', witness.id);
+      syncChannel.postMessage(broadcastMessage);
+    }, 100);
   }
   
   // Broadcast to WebRTC peers
@@ -1182,7 +1195,7 @@ export const initializeStore = () => {
         witnesses.update(current => {
           const existing = current.find(w => w.id === witness.id);
           if (!existing) {
-            console.log('📥 Loaded new witness from Gun.js:', witness.id, 'count:', witness.witnessCount);
+            console.log('📥 NEW witness from Gun.js:', witness.id, 'count:', witness.witnessCount, 'source: Gun.js sync');
             // Apply memory limit - remove oldest expired witnesses first
             if (current.length >= MAX_WITNESSES_IN_MEMORY) {
               const now = Date.now();
@@ -1218,23 +1231,35 @@ export const initializeStore = () => {
   // Debug: Test different Gun.js loading patterns
   console.log('🔄 Testing Gun.js data loading patterns...');
   
-  // Track loaded witness IDs to prevent duplicates
-  const loadedWitnessIds = new Set<string>();
+  // Track loaded witness IDs to prevent duplicates - but only for the same session
+  const processedInThisSession = new Set<string>();
   
-  // Modified load function that tracks loaded witnesses
+  // Modified load function that prevents duplicate processing within same Gun.js event batch
   const loadWitnessDataWithTracking = (data: any, key: string) => {
-    // Skip if already loaded to prevent duplicates
-    if (loadedWitnessIds.has(key)) {
+    // Only prevent duplicates if the data is identical AND was processed very recently (within 1 second)
+    const sessionKey = `${key}_${Date.now()}`;
+    const recentKeys = Array.from(processedInThisSession).filter(k => k.startsWith(key + '_'));
+    const recentlyProcessed = recentKeys.some(k => {
+      const timestamp = parseInt(k.split('_').pop() || '0');
+      return (Date.now() - timestamp) < 1000; // Only block if processed within last second
+    });
+    
+    if (recentlyProcessed) {
+      console.log('🔄 Skipping recently processed witness:', key);
       return;
     }
-    loadedWitnessIds.add(key);
     
-    // Clean up tracking set if it gets too large
-    if (loadedWitnessIds.size > MAX_WITNESSES_IN_MEMORY * 2) {
-      // Keep only the most recent entries
-      const recentIds = Array.from(loadedWitnessIds).slice(-MAX_WITNESSES_IN_MEMORY);
-      loadedWitnessIds.clear();
-      recentIds.forEach(id => loadedWitnessIds.add(id));
+    processedInThisSession.add(sessionKey);
+    
+    // Clean up tracking set to prevent memory leaks
+    if (processedInThisSession.size > MAX_WITNESSES_IN_MEMORY * 3) {
+      const cutoff = Date.now() - 10000; // Keep only last 10 seconds
+      const recentEntries = Array.from(processedInThisSession).filter(k => {
+        const timestamp = parseInt(k.split('_').pop() || '0');
+        return timestamp > cutoff;
+      });
+      processedInThisSession.clear();
+      recentEntries.forEach(k => processedInThisSession.add(k));
     }
     
     loadWitnessData(data, key);
